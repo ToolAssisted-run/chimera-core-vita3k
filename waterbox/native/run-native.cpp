@@ -1,5 +1,6 @@
-// The native reference: installs a .vpk into a fresh work directory, boots it
-// under Vita3K with no window, and reports what it presented.
+// The native reference: grafts a .vpk into the machine's filesystem (memfs,
+// /chimera), installs and boots it under Vita3K with no window, and reports
+// what it presented. The work directory receives the machine's log at exit.
 //
 // The machine runs on its own scheduler and clock (vsched): this thread is
 // its thread 0, and frame f ends at exactly f/60 s of machine time, so two
@@ -11,6 +12,7 @@
 
 #include "archive.h"
 #include "headless_frame.h"
+#include "../driver/memfs.h"
 #include "interface.h"
 
 #include <app/functions.h>
@@ -96,6 +98,21 @@ static bool fresh_work_dir(const fs::path &work) {
     return true;
 }
 
+// Every file of a host directory, grafted read-only under a tree path.
+static void graft_dir(const fs::path &host, const std::string &tree) {
+    std::vector<fs::path> files;
+    for (const auto &e : fs::recursive_directory_iterator(host))
+        if (e.is_regular_file())
+            files.push_back(e.path());
+    std::sort(files.begin(), files.end());
+    for (const auto &f : files)
+        chimera::memfs::graft(tree + "/" + fs::relative(f, host).generic_string(), f.string());
+}
+
+static int64_t machine_seconds() {
+    return static_cast<int64_t>(vsched_calendar_us() / 1000000ull);
+}
+
 int main(int argc, char **argv) {
     std::string vpk, work_arg;
     uint64_t frames = 300, digest_every = 0;
@@ -153,23 +170,32 @@ int main(int argc, char **argv) {
     if (!fresh_work_dir(work))
         return 2;
 
-    // Everything the emulator keeps lives in the work directory; the static
-    // assets (data/, shaders-builtin/) sit beside this program, as they do
-    // beside upstream's.
+    // Everything the emulator keeps lives in the machine's filesystem
+    // (memfs): the Vita's partitions, config, cache, log. The static assets
+    // (data/, shaders-builtin/ beside this program, as beside upstream's) and
+    // the app are grafted in read-only.
+    chimera::memfs::set_clock(machine_seconds);
+    const std::string tree = chimera::memfs::ROOT;
+    graft_dir(exe_dir() / "data", tree + "/assets/data");
+    graft_dir(exe_dir() / "shaders-builtin", tree + "/assets/shaders-builtin");
+    const std::string app = tree + "/rom/" + fs::path(vpk).filename().string();
+    if (!chimera::memfs::graft(app, fs::absolute(vpk).string())) {
+        std::fprintf(stderr, "run-native: cannot read %s\n", vpk.c_str());
+        return 4;
+    }
+    for (const char *d : { "/fs", "/cache", "/log", "/config", "/patch" })
+        chimera::memfs::mkdirs(tree + d);
     Root root_paths;
-    root_paths.set_static_assets_path(exe_dir() / "");
-    root_paths.set_vita_fs_path(work / "fs" / "");
-    root_paths.set_log_path(work / "");
-    root_paths.set_config_path(work / "");
-    root_paths.set_shared_path(work / "");
-    root_paths.set_cache_path(work / "cache" / "");
-    root_paths.set_patch_path(work / "patch" / "");
+    root_paths.set_static_assets_path(tree + "/assets/");
+    root_paths.set_vita_fs_path(tree + "/fs/");
+    root_paths.set_log_path(tree + "/log/");
+    root_paths.set_config_path(tree + "/config/");
+    root_paths.set_shared_path(tree + "/config/");
+    root_paths.set_cache_path(tree + "/cache/");
+    root_paths.set_patch_path(tree + "/patch/");
     // the emulator lists these without making them first
-    fs::create_directories(root_paths.get_vita_fs_path());
-    fs::create_directories(root_paths.get_cache_path());
-    fs::create_directories(root_paths.get_patch_path());
-
-    // the log goes to the work directory (vita3k.log), stdout is ours
+    // the log goes to the machine's filesystem (copied to --work at exit),
+    // stdout is ours
     if (logging::init(root_paths, false) != Success)
         return 3;
 
@@ -205,7 +231,7 @@ int main(int argc, char **argv) {
     app::load_users(emuenv);
 
     std::string title_id;
-    for (const auto &content : install_archive(emuenv, fs::absolute(vpk)))
+    for (const auto &content : install_archive(emuenv, app))
         if (content.category == "gd" && content.state)
             title_id = content.title_id;
     if (title_id.empty()) {
@@ -254,6 +280,15 @@ int main(int argc, char **argv) {
     std::printf("title=%s frames=%" PRIu64 " exited=%" PRIu64 " time_ns=%" PRIu64 " switches=%" PRIu64 " video=%016" PRIx64 " %dx%d\n", title_id.c_str(), seen,
         exited, vsched_now_ns(), vsched_switch_count(), picture.empty() ? 0 : fnv1a(picture), SCREEN_W, SCREEN_H);
     std::fflush(stdout);
+
+    // the machine's log, for a person to read
+    std::vector<uint8_t> log;
+    if (chimera::memfs::get(tree + "/log/vita3k.log", log)) {
+        if (FILE *f = std::fopen((work / "vita3k.log").c_str(), "wb")) {
+            std::fwrite(log.data(), 1, log.size(), f);
+            std::fclose(f);
+        }
+    }
 
     // Leave without tearing the machine down: guest threads are detached host
     // threads, and the process ending is the one stop they all obey.

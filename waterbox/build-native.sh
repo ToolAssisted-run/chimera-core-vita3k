@@ -7,6 +7,7 @@ root="$(dirname "$here")"
 build="$root/build/native"
 
 sh "$here/apply-patches.sh"
+sh "$here/build-deps.sh" native
 
 # GCC: clang 20 cannot compile libstdc++ 14's std::ranges::to, which
 # Vita3K's string utilities use (and Boost's bootstrap, run by Vita3K's CMake,
@@ -15,9 +16,9 @@ cc="${CC:-gcc}"
 cxx="${CXX:-g++}"
 
 cmake -S "$root/extern/vita3k" -B "$build" -G Ninja \
-	-DCMAKE_BUILD_TYPE=RelWithDebInfo \
+	-DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="-O2 -g -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-O2 -g -DNDEBUG" \
 	-DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cxx" \
-	-DCHIMERA_HEADLESS=ON -DCHIMERA_DRIVER_DIR="$here/native" \
-	-DUSE_DISCORD_RICH_PRESENCE=OFF \
+	-DCHIMERA_HEADLESS=ON -DCHIMERA_DRIVER_DIR="$here/native" -DCHIMERA_FFMPEG_DIR="$root/build/deps/ffmpeg-native" \
+	-DUSE_DISCORD_RICH_PRESENCE=OFF -DUSE_LTO=NEVER \
 	-DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF -DSDL_UNIX_CONSOLE_BUILD=ON
 cmake --build "$build" --target vita3k-run-native

@@ -7,6 +7,7 @@ find_package(OpenGL REQUIRED COMPONENTS EGL)
 add_executable(vita3k-run-native
 	run-native.cpp
 	headless_frame.cpp
+	../driver/memfs.cpp
 	${CMAKE_SOURCE_DIR}/vita3k/interface.cpp
 	${CMAKE_SOURCE_DIR}/vita3k/performance.cpp
 )
@@ -19,6 +20,9 @@ target_link_libraries(vita3k-run-native PRIVATE
 	SDL3::SDL3 OpenGL::EGL)
 
 set_target_properties(vita3k-run-native PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+# the machine's filesystem defines the C library's file calls: exported, so
+# the shared libraries (libstdc++'s file streams) reach them too
+target_link_options(vita3k-run-native PRIVATE "-Wl,--dynamic-list=${CMAKE_CURRENT_SOURCE_DIR}/memfs.list")
 
 # the static assets beside the program, where upstream's program has them
 add_custom_command(TARGET vita3k-run-native POST_BUILD

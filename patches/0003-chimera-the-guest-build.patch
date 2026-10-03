@@ -1,0 +1,116 @@
+diff --git a/external/CMakeLists.txt b/external/CMakeLists.txt
+--- a/external/CMakeLists.txt
++++ b/external/CMakeLists.txt
+@@ -273,7 +273,22 @@
+ if(ANDROID)
+ 	set(USE_STATIC_ANDROID_FFMPEG ON)
+ endif()
+-add_subdirectory(ffmpeg)
++if(CHIMERA_FFMPEG_DIR)
++	# FFmpeg built from source for the core, the same in both of its flavours
++	# (waterbox/build-deps.sh), in place of upstream's prebuilt download
++	add_library(ffmpeg INTERFACE)
++	# upstream's headers after ours: the one FFmpeg-internal header Vita3K
++	# reaches for (libavcodec/codec_internal.h) is only there
++	target_include_directories(ffmpeg INTERFACE "${CHIMERA_FFMPEG_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg/include")
++	target_link_libraries(ffmpeg INTERFACE
++		"${CHIMERA_FFMPEG_DIR}/lib/libavformat.a"
++		"${CHIMERA_FFMPEG_DIR}/lib/libavcodec.a"
++		"${CHIMERA_FFMPEG_DIR}/lib/libswscale.a"
++		"${CHIMERA_FFMPEG_DIR}/lib/libswresample.a"
++		"${CHIMERA_FFMPEG_DIR}/lib/libavutil.a")
++else()
++	add_subdirectory(ffmpeg)
++endif()
+ 
+ if(APPLE OR NOT FORCE_BUILD_OPENSSL_MAC)
+ 	execute_process(
+@@ -365,6 +380,9 @@
+ # Must be after openssl
+ add_subdirectory(psvpfstools)
+ 
++if(CHIMERA_HEADLESS)
++	# a Chimera core has no network: nothing links curl
++elseif(TRUE)
+ find_package(CURL QUIET)
+ if(NOT CURL_FOUND)
+ 	message("System curl not found, compiling curl from source")
+@@ -393,6 +411,7 @@
+ 	add_library(libcurl INTERFACE)
+ 	target_link_libraries(libcurl INTERFACE CURL::libcurl)
+ endif()
++endif()
+ 
+ 
+ file(GLOB LIBATRAC9_SOURCES
+@@ -467,7 +486,7 @@
+ # Use XDG desktop portals on Linux
+ set(NFD_PORTAL ON)
+ 
+-if(NOT ANDROID)
++if(NOT ANDROID AND NOT CHIMERA_HEADLESS)
+ 	# nativefiledialog-extended
+ 	add_subdirectory(nativefiledialog-extended)
+ 
+diff --git a/vita3k/app/CMakeLists.txt b/vita3k/app/CMakeLists.txt
+--- a/vita3k/app/CMakeLists.txt
++++ b/vita3k/app/CMakeLists.txt
+@@ -24,7 +24,7 @@
+ 	target_link_libraries(app PRIVATE dwmapi)
+ endif()
+ 
+-if (LINUX)
++if (LINUX AND NOT CHIMERA_HEADLESS)
+     find_package(X11 REQUIRED)
+     target_link_libraries(app PRIVATE ${X11_LIBRARIES})
+ endif()
+diff --git a/vita3k/util/CMakeLists.txt b/vita3k/util/CMakeLists.txt
+--- a/vita3k/util/CMakeLists.txt
++++ b/vita3k/util/CMakeLists.txt
+@@ -18,7 +18,12 @@
+ 
+ target_include_directories(util PUBLIC include)
+ target_link_libraries(util PUBLIC ${Boost_LIBRARIES} fmt spdlog http mem)
+-target_link_libraries(util PRIVATE libcurl crypto SDL3::SDL3)
++if(CHIMERA_HEADLESS)
++	# no network: no curl
++	target_link_libraries(util PRIVATE crypto SDL3::SDL3)
++else()
++	target_link_libraries(util PRIVATE libcurl crypto SDL3::SDL3)
++endif()
+ if(CHIMERA_HEADLESS)
+ 	target_link_libraries(util PUBLIC chimera)
+ endif()
+diff --git a/vita3k/util/src/net_utils.cpp b/vita3k/util/src/net_utils.cpp
+--- a/vita3k/util/src/net_utils.cpp
++++ b/vita3k/util/src/net_utils.cpp
+@@ -18,7 +18,9 @@
+ #include <util/log.h>
+ #include <util/net_utils.h>
+ 
++#ifndef CHIMERA
+ #include <curl/curl.h>
++#endif
+ 
+ #ifdef _WIN32
+ #include <iphlpapi.h>
+@@ -335,6 +337,11 @@
+ }
+ 
+ std::string get_web_response(const std::string &url) {
++#ifdef CHIMERA
++    // the machine has no network
++    (void)url;
++    return {};
++#else
+     auto curl = curl_easy_init();
+     if (!curl)
+         return {};
+@@ -365,6 +372,7 @@
+         return response_string;
+ 
+     return {};
++#endif
+ }
+ 
+ std::string get_web_regex_result(const std::string &url, const std::regex &regex) {

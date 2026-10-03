@@ -143,6 +143,41 @@ at exit) and the render thread crashed. A NULL frame buffer now blanks the
 display, as the hardware's does. An app that exits stops the machine where
 it stands (`exited=` in run-native's last line).
 
+### The machine's filesystem (2026-10-03, M2)
+
+The sandbox has a flat list of mounted files and lets a guest create none,
+and a host disk hands the machine the host's timestamps and directory order.
+So everything Vita3K keeps lives in an in-memory tree under /chimera
+(`waterbox/driver/memfs.cpp`), in BOTH flavours: the Vita's partitions,
+config, cache, log. It sits under the C library - open, stat, opendir,
+fopen and the rest are defined there and serve every /chimera path from the
+tree, passing any other path to the host - because Vita3K reaches files
+through boost::filesystem, file streams, stdio, miniz and spdlog, with no
+one layer of its own. A file's time is the machine's calendar, a listing is
+in name order, an inode is the order files were made in. The app and the
+static assets are grafted in read-only.
+
+- libstdc++'s file streams fopen a file and then read its descriptor, so a
+  stream over the tree is a fopencookie stream whose fileno is the tree's
+  descriptor; natively the overrides are exported (`native/memfs.list`) so
+  the shared libstdc++ reaches them.
+- Trap: a distribution's GCC fortifies by default, so Boost (built by its
+  own b2) calls `__open_2` and `__read_chk`, not open and read; the native
+  side defines those too.
+
+### Both builds (2026-10-03, M2)
+
+Release with `-O2 -g` in both (Tracy only switches on in Debug and
+RelWithDebInfo builds), no LTO, and FFmpeg 7.1.2 built from source for both
+by `build-deps.sh` - no assembly, no threads, only the decoders Vita3K opens
+(H.264, AAC, MP3, MJPEG) - in place of upstream's prebuilt download. The
+guest also gets OpenSSL 3.0.15 and Boost.Filesystem from that script. Patch
+0003 gates curl, nfd and X11 off and takes `CHIMERA_FFMPEG_DIR`; the one
+FFmpeg-internal header Vita3K uses (codec_internal.h) still comes from
+upstream's include directory. The guest toolchain disables the host's
+pkg-config (SDL found dbus and ibus through it). All of Vita3K compiles for
+the guest.
+
 ### The gate (2026-10-03)
 
 `waterbox/run-gate.sh`: every test app twice, compared frame by frame, plus
