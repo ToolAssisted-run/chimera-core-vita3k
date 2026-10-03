@@ -270,6 +270,27 @@ if [ -f "$game" ] && [ -f "$fonts" ]; then
 else
 	skip "Alien Shooter: no $game and $fonts"
 fi
+# The system software as well (System Software "full"): Alien Shooter loads
+# the system's own libraries from it, and none is missing.
+sysw="$content/PSVUPDAT.PUP"
+game="$content/alien-shooter.zip"
+if [ -f "$game" ] && [ -f "$fonts" ] && [ -f "$sysw" ]; then
+	(native alien-shooter-full-n "$game" 300 --firmware PSVUPDAT.PUP="$sysw" --firmware PSP2UPDAT.PUP="$fonts" --digest-every 30 >"$work/alien-shooter-full-n.rc") &
+	rw=$(sandboxed alien-shooter-full-w "$game" 300 --firmware PSVUPDAT.PUP="$sysw" --firmware PSP2UPDAT.PUP="$fonts" --digest-every 30)
+	wait
+	rn=$(cat "$work/alien-shooter-full-n.rc")
+	log="$work/alien-shooter-full-w-work/vita3k.log"
+	missing=$(grep -ac 'target path: \(vs0\|os0\):' "$log" 2>/dev/null)
+	version=$(grep -ao 'installed PSVUPDAT.PUP: system software [0-9.]*' "$log" | grep -o '[0-9.]*$')
+	if [ "$rn" = 0 ] && [ "$rw" = 0 ] && cmp -s "$work/alien-shooter-full-n.out" "$work/alien-shooter-full-w.out" && [ -n "$version" ] && [ "$missing" = 0 ]; then
+		pass "Alien Shooter on system software $version: native == sandbox in all 300 frames, no system module missing"
+	else
+		fail "Alien Shooter on the system software (exit $rn, $rw; version '$version', $missing missing system files)"
+	fi
+else
+	skip "Alien Shooter on the system software: no $sysw"
+fi
+
 # Alien Breed (PCSE00210; Ingame on Vita3K's list) asks for the network at
 # boot and threads heavily (about 1500 switches a frame): the machine has no
 # network, and the game carries on without one.
