@@ -74,7 +74,11 @@ Vulkan upstream.
   Vita3K's list) runs with the font package alone - its publishers' logos,
   its music - and is the same native and sandboxed in every digest line of
   900 frames, once miniBox's thread-local storage was fixed (below). About
-  2.5 frames a second on llvmpipe; a real GPU is unmeasured.
+  2.5 frames a second on llvmpipe; a real GPU is unmeasured. Alien Breed
+  (PCSE00210, Ingame) asks for the network at boot and threads heavily
+  (about 1500 switches a frame); with no network (patch 0008) and miniBox's
+  fault handler fixed (below) it reaches its developer's logo and is the
+  same native and sandboxed in 600 frames (36 s sandboxed).
 
 ## Decisions
 
@@ -405,6 +409,30 @@ local): its start-up hands musl the PT_TLS header, found through
 __ehdr_start, and nothing else; a test in miniBox's threads suite, negative-
 controlled. Every core that uses thread locals changes when rebuilt against
 it.
+
+### The machine has no network (2026-10-03, M6)
+
+Patch 0008. Alien Breed died at boot asking the sandbox for a socket: Vita3K
+reached the host's network from several places - every game socket was a
+host socket, the connection state said "IP obtained", the interface list
+was the host's (getifaddrs, over a netlink socket), the resolver asked the
+host's name servers, HTTP opened host sockets, and the system's user name
+was the host's name. Under CHIMERA: a game socket is made, as a Vita out of
+range makes one, with nothing behind it (sends, receives and connects say
+the network is down or unreachable); the state is disconnected and the
+connection info "not connected"; the interfaces are the loopback alone; the
+resolver times out; HTTP finds no name server; the MAC address is a fixed,
+locally administered one; the user name is the machine's user.
+
+### miniBox: the guest's fault handler ran on the host's %fs (2026-10-03, M6)
+
+Vita3K's write tracking unprotects pages from GuestFaultHandler, which
+miniBox calls on the faulting thread after putting the host's %fs back:
+with thread locals real (above), Alien Breed's first watched write ran the
+handler on the host's thread pointer and its mprotect was refused
+("something outside a fault took it"). miniBox 4852e35 (same local branch)
+runs the handler under the base the guest faulted on; a test in the threads
+suite, negative-controlled.
 
 ## Open questions
 

@@ -1,0 +1,172 @@
+diff --git a/vita3k/modules/SceAppUtil/SceAppUtil.cpp b/vita3k/modules/SceAppUtil/SceAppUtil.cpp
+--- a/vita3k/modules/SceAppUtil/SceAppUtil.cpp
++++ b/vita3k/modules/SceAppUtil/SceAppUtil.cpp
+@@ -552,7 +552,12 @@
+     char devname[devname_len];
+     switch (paramId) {
+     case SCE_SYSTEM_PARAM_ID_USER_NAME:
++#ifdef CHIMERA
++        // the machine's user, never the host's name
++        if (true) {
++#else
+         if (gethostname(devname, devname_len)) {
++#endif
+             // fallback to User Name
+             std::strncpy(devname, emuenv.io.user_name.c_str(), sizeof(devname));
+         }
+diff --git a/vita3k/modules/SceHttp/SceHttp.cpp b/vita3k/modules/SceHttp/SceHttp.cpp
+--- a/vita3k/modules/SceHttp/SceHttp.cpp
++++ b/vita3k/modules/SceHttp/SceHttp.cpp
+@@ -249,6 +249,11 @@
+         port = parsed.port;
+     // If fifth character is an s (meaning https) use 443, else 80
+ 
++#ifdef CHIMERA
++    // the machine has no network: no host socket, no name server
++    (void)isSecure;
++    return RET_ERROR(SCE_HTTP_ERROR_RESOLVER_ENODNS);
++#endif
+     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+     assert(sockfd);
+     if (sockfd < 0) {
+diff --git a/vita3k/modules/SceNet/SceNet.cpp b/vita3k/modules/SceNet/SceNet.cpp
+--- a/vita3k/modules/SceNet/SceNet.cpp
++++ b/vita3k/modules/SceNet/SceNet.cpp
+@@ -298,6 +298,13 @@
+     if (addr == nullptr) {
+         RET_NET_ERRNO(SCE_NET_ERROR_EINVAL);
+     }
++#ifdef CHIMERA
++    // the machine's own, the same on every host: a locally administered
++    // address, as no Vita's is
++    static const uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
++    memcpy(addr->data, mac, 6);
++    return 0;
++#endif
+ #ifdef _WIN32
+     IP_ADAPTER_INFO AdapterInfo[16];
+     DWORD dwBufLen = sizeof(AdapterInfo);
+@@ -555,6 +562,10 @@
+ 
+ EXPORT(int, sceNetResolverStartAton, int rid, const SceNetInAddr *addr, char *hostname, int len, int timeout, int retry, int flags) {
+     TRACY_FUNC(sceNetResolverStartAton, rid, addr, hostname, len, timeout, retry, flags);
++#ifdef CHIMERA
++    // no network, no name server
++    RET_NET_ERRNO(SCE_NET_ERROR_RESOLVER_ETIMEDOUT);
++#endif
+     struct hostent *resolved = gethostbyaddr((const char *)addr, len, AF_INET);
+     strcpy(hostname, resolved->h_name);
+     return 0;
+@@ -562,6 +573,11 @@
+ 
+ EXPORT(int, sceNetResolverStartNtoa, int rid, const char *hostname, SceNetInAddr *addr, int timeout, int retry, int flags) {
+     TRACY_FUNC(sceNetResolverStartNtoa, rid, hostname, addr, timeout, retry, flags);
++#ifdef CHIMERA
++    // no network, no name server
++    memset(addr, 0, sizeof(*addr));
++    RET_NET_ERRNO(SCE_NET_ERROR_RESOLVER_ETIMEDOUT);
++#endif
+     struct hostent *resolved = gethostbyname(hostname);
+     if (resolved == nullptr) {
+         memset(addr, 0, sizeof(*addr));
+@@ -662,7 +678,13 @@
+     TRACY_FUNC(sceNetSocket, name, domain, type, protocol);
+     bool isP2P = (type == SCE_NET_SOCK_DGRAM_P2P || type == SCE_NET_SOCK_STREAM_P2P);
+ 
++#ifdef CHIMERA
++    // the machine has no network (net/socket.h)
++    (void)isP2P;
++    SocketPtr sock = std::make_shared<NoNetSocket>(domain, type, protocol);
++#else
+     SocketPtr sock = isP2P ? std::make_shared<P2PSocket>(domain, type, protocol) : std::make_shared<PosixSocket>(domain, type, protocol);
++#endif
+ 
+     auto id = ++emuenv.net.next_id;
+     emuenv.net.socks.emplace(id, sock);
+diff --git a/vita3k/modules/SceNetCtl/SceNetCtl.cpp b/vita3k/modules/SceNetCtl/SceNetCtl.cpp
+--- a/vita3k/modules/SceNetCtl/SceNetCtl.cpp
++++ b/vita3k/modules/SceNetCtl/SceNetCtl.cpp
+@@ -566,6 +566,11 @@
+         return RET_ERROR(SCE_NET_CTL_ERROR_INVALID_ADDR);
+     }
+ 
++#ifdef CHIMERA
++    // the machine has no network, and the host's addresses are not its own
++    (void)code;
++    return RET_ERROR(SCE_NET_CTL_ERROR_NOT_CONNECTED);
++#endif
+     const auto addr = net_utils::get_selected_assigned_addr(emuenv.cfg.adhoc_addr);
+ 
+     switch (code) {
+@@ -672,6 +677,11 @@
+         return RET_ERROR(SCE_NET_CTL_ERROR_INVALID_ADDR);
+     }
+ 
++#ifdef CHIMERA
++    // the machine has no network
++    *state = SCE_NET_CTL_STATE_DISCONNECTED;
++    return 0;
++#endif
+     *state = SCE_NET_CTL_STATE_IPOBTAINED;
+     return STUBBED("state = SCE_NETCTL_STATE_CONNECTED");
+ }
+diff --git a/vita3k/net/include/net/socket.h b/vita3k/net/include/net/socket.h
+--- a/vita3k/net/include/net/socket.h
++++ b/vita3k/net/include/net/socket.h
+@@ -69,6 +69,40 @@
+     virtual int get_socket_address(SceNetSockaddr *addr, unsigned int *addrlen) = 0;
+ };
+ 
++#ifdef CHIMERA
++// Chimera: the machine has no network. A socket is still made - a Vita out
++// of range makes them too - but nothing is behind it: no host socket, and
++// every attempt to reach anything says the network is down.
++struct NoNetSocket : public Socket {
++    explicit NoNetSocket(int domain, int type, int protocol)
++        : Socket(domain, type, protocol) {}
++    int abort(int) override { return 0; }
++    int close() override { return 0; }
++    int shutdown_socket(int) override { return SCE_NET_ERROR_ENOTCONN; }
++    int bind(const SceNetSockaddr *, unsigned int) override { return 0; }
++    int send_packet(const void *, unsigned int, int, const SceNetSockaddr *, unsigned int) override { return SCE_NET_ERROR_ENETDOWN; }
++    int recv_packet(void *, unsigned int, int, SceNetSockaddr *, unsigned int *) override { return SCE_NET_ERROR_ENETDOWN; }
++    int set_socket_options(int, int, const void *, unsigned int) override { return 0; }
++    int get_socket_options(int, int, void *optval, unsigned int *optlen) override {
++        if (optval && optlen)
++            memset(optval, 0, *optlen);
++        return 0;
++    }
++    int connect(const SceNetSockaddr *, unsigned int) override { return SCE_NET_ERROR_ENETUNREACH; }
++    SocketPtr accept(SceNetSockaddr *, unsigned int *, int &err) override {
++        err = SCE_NET_ERROR_ENETDOWN;
++        return nullptr;
++    }
++    int listen(int) override { return 0; }
++    int get_peer_address(SceNetSockaddr *, unsigned int *) override { return SCE_NET_ERROR_ENOTCONN; }
++    int get_socket_address(SceNetSockaddr *addr, unsigned int *addrlen) override {
++        if (addr && addrlen)
++            memset(addr, 0, *addrlen);
++        return 0;
++    }
++};
++#endif
++
+ // udp, tcp
+ struct PosixSocket : public Socket {
+     abs_socket sock;
+diff --git a/vita3k/util/src/net_utils.cpp b/vita3k/util/src/net_utils.cpp
+--- a/vita3k/util/src/net_utils.cpp
++++ b/vita3k/util/src/net_utils.cpp
+@@ -402,6 +402,12 @@
+ 
+         return out_addrs;
+     };
++#ifdef CHIMERA
++    // the machine has no network: only its own loopback, never the host's
++    // interfaces (which differ host to host, and which the sandbox cannot
++    // list anyway)
++    return ret_addrs();
++#endif
+ 
+ #ifdef _WIN32
+     PIP_ADAPTER_INFO pAdapterInfo;

@@ -366,6 +366,11 @@ static int harness_run(const struct harness_core *c, const struct harness_opts *
 			break;
 		const uint64_t f = c->frame_count();
 		const uint8_t *pic = (const uint8_t *)c->video();
+		if (!pic) {
+			/* a machine that died answers nothing (miniBox said why) */
+			fprintf(stderr, "the machine died in frame %" PRIu64 "\n", f + 1);
+			return 7;
+		}
 		const int pairs = c->audio_count();
 		const uint8_t *snd = (const uint8_t *)c->audio();
 		const size_t snd_bytes = (size_t)pairs * 4;

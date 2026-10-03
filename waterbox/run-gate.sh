@@ -261,6 +261,24 @@ if [ -f "$game" ] && [ -f "$fonts" ]; then
 else
 	skip "Alien Shooter: no $game and $fonts"
 fi
+# Alien Breed (PCSE00210; Ingame on Vita3K's list) asks for the network at
+# boot and threads heavily (about 1500 switches a frame): the machine has no
+# network, and the game carries on without one.
+game="$content/alien-breed.zip"
+if [ -f "$game" ] && [ -f "$fonts" ]; then
+	(native alien-breed-n "$game" 600 --firmware PSP2UPDAT.PUP="$fonts" --digest-every 30 >"$work/alien-breed-n.rc") &
+	rw=$(sandboxed alien-breed-w "$game" 600 --firmware PSP2UPDAT.PUP="$fonts" --digest-every 30)
+	wait
+	rn=$(cat "$work/alien-breed-n.rc")
+	pics=$(grep -o 'video=[0-9a-f]*' "$work/alien-breed-w.out" | sort -u | wc -l)
+	if [ "$rn" = 0 ] && [ "$rw" = 0 ] && cmp -s "$work/alien-breed-n.out" "$work/alien-breed-w.out" && [ "$pics" -ge 3 ]; then
+		pass "Alien Breed: native == sandbox in all 600 frames, $pics pictures; $(tail -1 "$work/alien-breed-w.out" | grep -o 'switches=[0-9]*')"
+	else
+		fail "Alien Breed: native and sandbox differ, or it drew $pics pictures (exit $rn, $rw) - $(diff "$work/alien-breed-n.out" "$work/alien-breed-w.out" | sed -n 2p)"
+	fi
+else
+	skip "Alien Breed: no $game and $fonts"
+fi
 
 # input and sound through states: rerecord legs on the two M4 apps
 r=$(sandboxed inputtest-rerecord inputtest.vpk 60 --rerecord --input "$script" --savedata-out "$work/inputtest-rerecord-sd")
