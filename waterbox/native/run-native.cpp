@@ -3,9 +3,9 @@
 // machine's GL calls go through the same generated wrappers and the same
 // dispatcher as in the sandbox, and the two flavours differ only by it.
 //
-// The work directory holds what the sandbox would see mounted: rom.name
-// (naming the app), settings, and savedata (a copy of --savedata-in); the
-// app is read where it lies.
+// The work directory holds what the sandbox would see mounted: rom.name and
+// slots (naming the app), settings, and a copy of any --savedata-in zip under
+// its own name; the app is read where it lies.
 //
 // usage: vita3k-run-native <app.vpk> --work <dir> [options: see gate-harness.h]
 // SPDX-License-Identifier: MIT
@@ -34,6 +34,7 @@ uint64_t GetSwitchCount(void);
 int64_t GetLogSize(void);
 const uint8_t *GetLogBuffer(void);
 void SetAxis(int32_t index, int32_t value);
+void SetRenderingEnabled(int on);
 int16_t *GetAudio(void);
 int GetAudioSampleCount(void);
 int InputWasRead(void);
@@ -83,8 +84,23 @@ int main(int argc, char **argv) {
         fprintf(stderr, "cannot write the work directory\n");
         return 2;
     }
+    char slots[8192];
+    harness_slots(&o, app, slots, sizeof slots);
+    if (!write_file(work + "/slots", slots)) {
+        fprintf(stderr, "cannot write the work directory\n");
+        return 2;
+    }
+    for (int f = 0; f < o.firmware_n; f++) {
+        // a copy, never a link: a link back to the user's files is a way to
+        // write to them
+        const std::string cmd = "cp '" + std::string(o.firmware_path[f]) + "' '" + work + "/" + o.firmware_id[f] + "'";
+        if (system(cmd.c_str()) != 0) {
+            fprintf(stderr, "cannot copy %s\n", o.firmware_path[f]);
+            return 2;
+        }
+    }
     if (o.savedata_in) {
-        const std::string cmd = "cp '" + std::string(o.savedata_in) + "' '" + work + "/savedata'";
+        const std::string cmd = "cp '" + std::string(o.savedata_in) + "' '" + work + "/" + harness_base(o.savedata_in) + "'";
         if (system(cmd.c_str()) != 0) {
             fprintf(stderr, "cannot copy %s\n", o.savedata_in);
             return 2;
@@ -109,7 +125,7 @@ int main(int argc, char **argv) {
     const harness_core c = { Init, GetLoadError, FrameAdvance, GetVideoBgra, GetVideoWidth, GetVideoHeight,
         GetFrameCount, GetExitedAt, GetMachineTimeNs, GetSwitchCount, GetLogSize, GetLogBuffer, nullptr, nullptr, nullptr,
         SetAxis, GetAudio, GetAudioSampleCount, InputWasRead, GetSaveDataFileCount, GetSaveDataFileName,
-        GetSaveDataFileSize, GetSaveDataFileBuffer };
+        GetSaveDataFileSize, GetSaveDataFileBuffer, SetRenderingEnabled };
     const char *slash = strrchr(app, '/');
     const int rc = harness_run(&c, &o, slash ? slash + 1 : app);
     long last = 0;

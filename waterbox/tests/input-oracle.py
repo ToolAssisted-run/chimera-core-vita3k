@@ -9,6 +9,9 @@ here and not taken from the core.
   input-oracle.py check SCRIPT INPUT_TXT      compare InputTest's lines with
                                               the prediction; exit 1 on any
                                               difference
+  input-oracle.py movie SCRIPT FRAMES OUT     the script as a Chimera movie
+                                              (one entry a frame: the 14 axes,
+                                              then the 14 buttons)
 
 A line tagged v<n> was read in the middle of frame n+1. SPDX-License-Identifier: MIT
 """
@@ -122,9 +125,20 @@ def check(script_path, input_path):
     return 1 if bad else 0
 
 
+def movie(script_path, frames, out):
+    script = read_script(script_path)
+    lines = []
+    for f in range(1, frames + 1):
+        mask, axes = at(script, f)
+        lines.append("|" + "".join("%5d," % v for v in axes) + "".join("P" if mask >> b & 1 else "." for b in range(14)) + "|")
+    open(out, "w").write("\n".join(lines) + "\n")
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "gen":
         gen(sys.argv[2], int(sys.argv[3]), int(sys.argv[4]) if len(sys.argv) > 4 else 0)
+    elif len(sys.argv) == 5 and sys.argv[1] == "movie":
+        movie(sys.argv[2], int(sys.argv[3]), sys.argv[4])
     elif len(sys.argv) == 4 and sys.argv[1] == "check":
         sys.exit(check(sys.argv[2], sys.argv[3]))
     else:

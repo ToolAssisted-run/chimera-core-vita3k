@@ -15,7 +15,9 @@
 #include <config/state.h>
 #include <ctrl/ctrl.h>
 #include <emuenv/state.h>
+#include <mem/functions.h>
 #include <modules/module_parent.h>
+#include <packages/functions.h>
 #include <motion/functions.h>
 #include <touch/functions.h>
 #include <util/fs.h>
@@ -26,7 +28,10 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
+#include <iostream>
 #include <memory>
+#include <sstream>
 
 namespace chimera_vita3k {
 
@@ -47,6 +52,7 @@ struct Machine {
 };
 
 Machine *g_machine;
+BridgeFrame *g_frame_host;
 
 // the buttons' bits as the pad reports them, in the declared order; L and R
 // are L1/R1 to the 2/Ext2 reads, as on the hardware
@@ -72,6 +78,7 @@ int64_t machine_seconds() {
 } // namespace
 
 bool boot(const std::string &host_name, const Options &options, BridgeFrame &frame, std::string &error) {
+    g_frame_host = &frame;
     // The machine's clock starts here, on this thread, before anything of
     // the emulator exists; every thread it makes is scheduled from then on.
     vsched_init();
@@ -139,6 +146,9 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     cfg.shader_cache = false;
     cfg.log_level = 3;
     cfg.disable_surface_sync = options.no_surface_sync;
+    // the system parameters games read (sceAppUtilSystemParamGetInt)
+    cfg.sys_lang = options.language;
+    cfg.sys_button = options.enter_button;
 
     if (!app::init(emuenv, cfg, root_paths)) {
         error = "the emulated environment could not be made";
@@ -148,10 +158,43 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     app::init_apps_list(emuenv);
     app::load_users(emuenv);
 
+    // the system software the project brings, installed as Vita3K installs
+    // it (os0, vs0, sa0, pd0 into the Vita's filesystem): before the app, and
+    // before the machine is sealed, so a state carries none of it
+    for (const std::string &pup : options.firmware) {
+        // each file installs its own partition, and the two are easy to
+        // swap by name: the system software fills vs0, the fonts sa0 (the
+        // folders themselves exist from the start)
+        const bool fonts = pup.find("PSP2UPDAT") != std::string::npos;
+        const char *partition = fonts ? "sa0" : "vs0";
+        const std::string where = tree + "/fs/" + partition;
+        const size_t had = chimera::memfs::list(where).size();
+        const std::string version = install_pup(emuenv.vita_fs_path, pup);
+        if (version.empty()) {
+            error = "cannot install the system software " + pup;
+            return false;
+        }
+        if (chimera::memfs::list(where).size() <= had) {
+            error = pup + " installed nothing in " + partition + ": it is not the " + (fonts ? "font package" : "system software")
+                + (fonts ? " (is it the system software, PSVUPDAT.PUP?)" : " (is it the font package, PSP2UPDAT.PUP?)");
+            return false;
+        }
+        LOG_INFO("installed {}: system software {}", pup, version);
+    }
+
+    // what the install prints (Vita3K's PFS decryption talks on stdout) goes
+    // to the machine's log, not to the frontend's output
     std::string title_id;
-    for (const auto &content : install_archive(emuenv, app))
-        if (content.category == "gd" && content.state)
-            title_id = content.title_id;
+    {
+        std::ostringstream said;
+        std::streambuf *was = std::cout.rdbuf(said.rdbuf());
+        for (const auto &content : install_archive(emuenv, app))
+            if (content.category == "gd" && content.state)
+                title_id = content.title_id;
+        std::cout.rdbuf(was);
+        if (!said.str().empty())
+            LOG_DEBUG("the install said:\n{}", said.str());
+    }
     if (title_id.empty()) {
         error = host_name + " installed no application";
         return false;
@@ -193,6 +236,11 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
         return false;
     }
     return true;
+}
+
+void set_rendering(bool on) {
+    if (g_frame_host)
+        g_frame_host->readback = on;
 }
 
 void set_input(uint64_t buttons, const int32_t axes[AXES]) {
@@ -282,6 +330,35 @@ uint64_t time_ns() {
 
 uint64_t switches() {
     return vsched_switch_count();
+}
+
+bool bus_ready() {
+    return g_machine != nullptr && g_machine->emuenv.mem.memory;
+}
+
+uint8_t bus_peek(uint32_t addr) {
+    if (!bus_ready() || !is_valid_addr(g_machine->emuenv.mem, addr))
+        return 0;
+    return g_machine->emuenv.mem.memory.get()[addr];
+}
+
+void bus_poke(uint32_t addr, uint8_t value) {
+    if (bus_ready() && is_valid_addr(g_machine->emuenv.mem, addr))
+        g_machine->emuenv.mem.memory.get()[addr] = value;
+}
+
+void bus_read(uint64_t addr, uint8_t *out, size_t len) {
+    constexpr uint64_t PAGE = 4096;
+    while (len) {
+        const size_t n = static_cast<size_t>(std::min<uint64_t>(len, PAGE - addr % PAGE));
+        if (addr < BUS_SIZE && bus_ready() && is_valid_addr(g_machine->emuenv.mem, static_cast<Address>(addr)))
+            std::memcpy(out, g_machine->emuenv.mem.memory.get() + addr, n);
+        else
+            std::memset(out, 0, n);
+        out += n;
+        addr += n;
+        len -= n;
+    }
 }
 
 bool log(std::vector<uint8_t> &out) {

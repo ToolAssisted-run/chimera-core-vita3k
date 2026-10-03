@@ -1,0 +1,26 @@
+{
+  "_comment": "A Vita project is one game, and whatever it already saved. The system software is firmware (the System Software setting says which).",
+  "slots": [
+    {
+      "id": "game",
+      "title": "Game",
+      "min": 1,
+      "max": 1,
+      "formats": [
+        "vpk",
+        "zip"
+      ],
+      "help": "The game: a .vpk, or a NoNpDRM dump as a .zip (the game's folder with its sce_sys/package/work.bin). Vita3K installs it into the machine before it starts. Vita3K's compatibility list (vita3k.org/compatibility) says which games work."
+    },
+    {
+      "id": "savedata",
+      "title": "Save data",
+      "min": 0,
+      "max": 1,
+      "formats": [
+        "zip"
+      ],
+      "help": "What the game already saved, as Emulator > Export Save Data... wrote it: a .zip with savedata/<TITLE ID>/... (the save data system's) and data/... (where homebrew keeps its). A save copied off a Vita with ux0:/user/00/ in front, or a bare <TITLE ID>/ folder, is taken too. It goes into the machine before the game starts."
+    }
+  ]
+}

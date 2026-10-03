@@ -1,0 +1,161 @@
+name: chimera waterbox core
+
+# The core as Chimera ships it: a sandboxed core.wbx package.
+#
+# No Vita game or system software is ours to put on a public runner, so the
+# gate here runs on homebrew: the Vita SDK's samples and our own test apps,
+# built fresh. It builds the native reference and the package from the pinned
+# upstream with the patch series applied, compares them frame by frame and
+# through states, checks input, sound and save data against oracles, runs the
+# package through chimera-run, and puts it through Chimera's own contract
+# tests. The legs that need a game or the firmware say SKIP here; they run
+# where those are (build/content or VITA3K_CONTENT), before anything is
+# pushed.
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'dev (rolling) or nightly (dated). Blank means dev.'
+        required: false
+        default: ''
+        type: string
+  schedule:
+    # 04:00 UTC. A nightly is published only when main moved since the last one;
+    # the reusable workflow checks, so an unchanged core costs one idle run.
+    - cron: '0 4 * * *'
+
+# Keyed by the EVENT as well as the ref: the nightly schedule and a push to
+# main would otherwise cancel each other, and the publish that depends on the
+# cancelled gate is then skipped with nothing reporting a failure.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  CHIMERA_REF: main
+
+jobs:
+
+  gate:
+    name: gate (package, native == sandbox, states, oracles, Chimera contract)
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check out Vita3K and its submodules
+        # Vita3K's CMake wants every submodule present, nested ones included.
+        run: git submodule update --init --recursive --depth 1
+
+      - name: Check out Chimera
+        uses: actions/checkout@v6
+        with:
+          repository: ToolAssisted-run/chimera
+          ref: ${{ env.CHIMERA_REF }}
+          path: chimera-checkout
+          submodules: recursive
+
+      - name: Install build dependencies
+        # llvmpipe (Mesa's EGL) is the GPU both flavours draw on here.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 perl curl xz-utils bzip2 mono-complete libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libx11-dev libxext-dev libasound2-dev
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+
+      - name: Build Chimera native dependencies
+        working-directory: chimera-checkout
+        run: |
+          meson setup build/meson-linux --prefix "$PWD/build" --libdir dll
+          meson compile -C build/meson-linux
+          meson install -C build/meson-linux
+
+      - name: Build the Chimera solution
+        working-directory: chimera-checkout
+        run: dotnet build source/gui/Chimera.sln -c Release /nodeReuse:false -p:UseSharedCompilation=false
+
+      - name: Cache the guest toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            chimera-checkout/extern/chimera-common-minibox/build/meson-linux
+            chimera-checkout/extern/chimera-common-minibox/build/meson-cpp
+          key: guest-cpp-${{ runner.os }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/.git') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/meson.build') }}
+
+      - name: Build miniBox (host + C++ guest toolchain)
+        run: |
+          mb="$PWD/chimera-checkout/extern/chimera-common-minibox"
+          [ -f "$mb/build/meson-linux/build.ninja" ] || meson setup "$mb/build/meson-linux" "$mb"
+          meson compile -C "$mb/build/meson-linux"
+          [ -f "$mb/build/meson-cpp/build.ninja" ] || meson setup "$mb/build/meson-cpp" "$mb" -Dguest_cpp=true
+          meson compile -C "$mb/build/meson-cpp"
+
+      - name: Cache the libraries and the Vita SDK
+        # FFmpeg, OpenSSL, Boost and zlib for both flavours, and the Vita SDK
+        # the test apps are built with: all pinned by SHA-256 in the scripts
+        # that fetch them, so the scripts' hashes key the cache.
+        uses: actions/cache@v4
+        with:
+          path: build/deps
+          key: deps-${{ runner.os }}-${{ hashFiles('waterbox/build-deps.sh', 'waterbox/build-testapps.sh', 'waterbox/guest-toolchain.cmake') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/.git') }}
+
+      - name: Core gate (builds everything and the package)
+        # The commit is the core's authoritative version: this build is the one
+        # that publishes the artifact, so what it stamps is what a movie can
+        # cite. A package built by hand stamps "+local" instead.
+        env:
+          CORE_VERSION: ${{ github.sha }}
+          CHIMERA_ROOT: ${{ github.workspace }}/chimera-checkout
+          MINIBOX_DIR: ${{ github.workspace }}/chimera-checkout/extern/chimera-common-minibox
+        run: sh ./waterbox/run-gate.sh
+
+      - name: The package through the real frontend
+        # Chimera's own contract tests, run against THIS package: readable,
+        # built for an ABI this frontend runs, a working factory, binding only
+        # buttons its controller declares, stamping a version.
+        working-directory: chimera-checkout
+        env:
+          CHIMERA_CORES_DIR: ${{ github.workspace }}/chimera-checkout/build/Cores
+        run: |
+          dotnet test source/gui/Chimera.Tests.Client.Common/Chimera.Tests.Client.Common.csproj \
+            -c Release --nologo \
+            --filter "FullyQualifiedName~InstalledCorePackagesTests|FullyQualifiedName~MnemonicUniquenessTests"
+
+      - name: Publish the core package
+        uses: actions/upload-artifact@v7
+        with:
+          name: vita3k-${{ github.sha }}
+          path: chimera-checkout/build/Cores/vita3k.chimeraCore
+          if-no-files-found: error
+
+      - name: Upload the gate work dir on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-work
+          path: build/gate/
+
+  publish:
+    # What the gate passed, published as this core's own release: a rolling
+    # `dev` on every green push to main, an immutable `nightly-YYYY-MM-DD` from
+    # the scheduled run, through the one reusable workflow every core
+    # publishes with.
+    name: publish
+    needs: [ gate ]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write
+    uses: ToolAssisted-run/chimera/.github/workflows/publish-core.yml@main
+    with:
+      core-id: vita3k
+      artifact: vita3k-${{ github.sha }}
+      package: vita3k.chimeraCore
+      kind: ${{ github.event.inputs.kind }}

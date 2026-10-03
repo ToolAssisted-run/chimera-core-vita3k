@@ -64,8 +64,17 @@ Vulkan upstream.
   back in. All of it native == sandbox, and under a load every frame.
   Negative controls: the script one frame late, and one sample taken out of
   the sound, both fail their oracles.
-- [ ] M5 package, gate, CI.
-- [ ] M6 games.
+- [x] M5 package, gate, CI (2026-10-03): vita3k.chimeraCore builds
+  deterministically (26 licence components), declares what the core reads (a
+  gate leg checks it, and sees a swap), and runs in Chimera's own engine:
+  InputTest driven by a movie through chimera-run reads exactly the input
+  the oracle predicts. Turbo leaves the machine untouched. The CI workflow
+  is written and untested (there is no GitHub repository yet).
+- [ ] M6 games. Begun 2026-10-03: Alien Shooter (PCSE00445, Playable on
+  Vita3K's list) runs with the font package alone - its publishers' logos,
+  its music - and is the same native and sandboxed in every digest line of
+  900 frames, once miniBox's thread-local storage was fixed (below). About
+  2.5 frames a second on llvmpipe; a real GPU is unmeasured.
 
 ## Decisions
 
@@ -352,9 +361,58 @@ Patch 0006 and `waterbox/driver` (`set_input`, `savedata.cpp`).
 - Not covered: the PS TV's controls (L2/R2/L3/R3 and more pads), the PS
   button, a second finger on a panel, the microphone and the camera.
 
+### The package (2026-10-03, M5)
+
+- systemId PSV. The controls, sound and states as M3/M4 made them;
+  `gpuStatesSurviveTheContext` (the fresh-process state leg proves it). Not
+  `drawEveryFrame`: with surface sync the drawing is machine state, so turbo
+  (`SetRenderingEnabled`) skips only the readback of each present and the
+  GPU goes on drawing; the gate's turbo leg leaves the machine identical in
+  every frame and the pictures outside the window.
+- Settings: System Software (full / fonts / none), System Language (the
+  Vita's twenty), Enter Button (cross / circle), Clock at Power-On, CPU
+  Clock. Language and enter button are the system parameters games read
+  (sceAppUtilSystemParamGetInt); InputTest prints them, and a leg sees them
+  arrive.
+- Firmware: the system software (PSVUPDAT.PUP) and the font package
+  (PSP2UPDAT.PUP), required as System Software says, installed with Vita3K's
+  own install_pup into the machine's filesystem before the game, so before
+  the seal. The two are easy to swap by name, so each must install its own
+  partition (vs0, sa0) or the load says which it looks like.
+- Slots: the game (.vpk, or a NoNpDRM .zip, which Vita3K decrypts with its
+  zRIF) and the save data. The core reads the project's slot map, as
+  touchHLE's does, and takes a slot's file under either spelling of its
+  mount ("name" or "/name").
+- Memory: no domain (the game allocates its own as it runs); one bus over
+  the Vita's 4 GiB, a page at a time, with ReadBus for runs.
+- Found on the way, all in the core's own filesystem or log: boost's
+  remove_all opens a directory and hands the descriptor to fdopendir, which
+  must keep it (it closed it); libstdc++'s copy_file copies through
+  sendfile/copy_file_range and advises with posix_fadvise, which the sandbox
+  does not have; the log carried the host's time natively; and the PFS
+  decryption talks on stdout, which now goes to the log.
+
+### miniBox: thread locals had no room (2026-10-03, M6)
+
+Alien Shooter's start-up picture came out upside down in the sandbox and
+upright natively: stb_image keeps its flip-on-load switch in thread locals,
+and on the render thread a zeroed thread_local read garbage. The waterbox
+musl starts with an empty auxiliary vector, so __init_tls never saw the
+program's PT_TLS and reserved no room for thread locals: on a new thread
+they lay on the top of its own stack, on the main thread on the static data
+before musl's builtin TLS. Fixed in miniBox (a1c7a42, branch guest-tls-phdr,
+local): its start-up hands musl the PT_TLS header, found through
+__ehdr_start, and nothing else; a test in miniBox's threads suite, negative-
+controlled. Every core that uses thread locals changes when rebuilt against
+it.
+
 ## Open questions
 
 - SDL stays linked (threads in the kernel, pads, audio): M4 decides whether
   input and sound still need it.
 - A game's speed with every guest thread on one host core, and with surface
-  sync on (M6).
+  sync on, on a real GPU (M6).
+- psvpfstools states no licence (Vita3K ships it in every release); it is
+  what decrypts NoNpDRM dumps. Publishing the package is the owner's call.
+- Publishing also needs miniBox's thread-local fix pushed, or the package CI
+  builds has the bug.

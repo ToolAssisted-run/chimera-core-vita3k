@@ -6,9 +6,11 @@
  *   a<accel x,y,z in thousandths of a g> g<gyro x,y,z in milliradians a second>
  *
  * f is the front panel, k the rear. Each read is 8 ms after a vblank, in the
- * middle of the frame, so a line tagged v<n> is frame n+1's input. The save,
- * savedata0:count.bin, counts the runs: read at start ("loaded N" or "loaded
- * none"), written one higher at vcount 30 ("saved N"). CC0. */
+ * middle of the frame, so a line tagged v<n> is frame n+1's input. The first
+ * line is the system parameters the machine was set up with ("system
+ * lang=L enter=E", the Vita's own values). The save, savedata0:count.bin,
+ * counts the runs: read at start ("loaded N" or "loaded none"), written one
+ * higher at vcount 30 ("saved N"). CC0. */
 #include <psp2/apputil.h>
 #include <psp2/ctrl.h>
 #include <psp2/display.h>
@@ -16,6 +18,7 @@
 #include <psp2/io/stat.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/motion.h>
+#include <psp2/system_param.h>
 #include <psp2/touch.h>
 
 #include <math.h>
@@ -57,6 +60,12 @@ int main(void)
 	out = sceIoOpen("ux0:data/inputtest/input.txt", SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
 
 	char line[256];
+	int lang = -1, enter = -1;
+	sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_LANG, &lang);
+	sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_ENTER_BUTTON, &enter);
+	snprintf(line, sizeof line, "system lang=%d enter=%d\n", lang, enter);
+	put(line);
+
 	int count = -1;
 	SceUID fd = sceIoOpen("savedata0:count.bin", SCE_O_RDONLY, 0);
 	if (fd >= 0) {

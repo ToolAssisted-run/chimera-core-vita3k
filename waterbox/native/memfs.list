@@ -37,6 +37,11 @@
 	ftruncate;
 	ftruncate64;
 	fsync;
+	sendfile;
+	sendfile64;
+	copy_file_range;
+	posix_fadvise;
+	posix_fadvise64;
 	fdatasync;
 	utimensat;
 	futimens;

@@ -15,4 +15,7 @@ builds) and `docs/PLAN.md` (the design and the reasoning behind it).
 - `waterbox/run-gate.sh` runs every test app twice natively and once in the
   sandbox and compares them frame by frame: the machine keeps its own clock,
   so a run never depends on the host. States, input, sound and save data are
-  checked too, against oracles that predict them.
+  checked too, against oracles that predict them. Games and firmware go in
+  `build/content` (or `VITA3K_CONTENT`); without them those legs say SKIP.
+- `waterbox/build-package.sh` builds `vita3k.chimeraCore` and installs it
+  into a Chimera checkout's `build/Cores`.

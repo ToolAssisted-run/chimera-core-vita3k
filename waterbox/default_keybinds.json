@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "The Vita on the keyboard and the first pad: the face buttons where a PlayStation pad has them",
+    "(Cross bottom, Circle right), the D-pad on the arrows, both sticks on the pad's sticks, and the front panel",
+    "under the mouse: its left button touches where the pointer is on the picture. The rear panel and the",
+    "motion sensors are left unbound."
+  ],
+  "AllTrollers": {
+    "PlayStation Vita": {
+      "Up": "Up, J1 POV1U, X1 DpadUp",
+      "Down": "Down, J1 POV1D, X1 DpadDown",
+      "Left": "Left, J1 POV1L, X1 DpadLeft",
+      "Right": "Right, J1 POV1R, X1 DpadRight",
+      "Cross": "X, J1 B2, X1 A",
+      "Circle": "C, J1 B3, X1 B",
+      "Square": "Z, J1 B1, X1 X",
+      "Triangle": "S, J1 B4, X1 Y",
+      "L": "Q, J1 B5, X1 LeftShoulder",
+      "R": "W, J1 B6, X1 RightShoulder",
+      "Start": "Enter, J1 B10, X1 Start",
+      "Select": "Backspace, J1 B9, X1 Back",
+      "Front Touch": "WMouse L",
+      "Rear Touch": ""
+    }
+  },
+  "AllTrollersAutoFire": {
+    "PlayStation Vita": {}
+  },
+  "AllTrollersAnalog": {
+    "PlayStation Vita": {
+      "Left Stick X": {
+        "Value": "X1 LeftThumbX Axis",
+        "Mult": 1.0,
+        "Deadzone": 0.1
+      },
+      "Left Stick Y": {
+        "Value": "X1 LeftThumbY Axis",
+        "Mult": 1.0,
+        "Deadzone": 0.1
+      },
+      "Right Stick X": {
+        "Value": "X1 RightThumbX Axis",
+        "Mult": 1.0,
+        "Deadzone": 0.1
+      },
+      "Right Stick Y": {
+        "Value": "X1 RightThumbY Axis",
+        "Mult": 1.0,
+        "Deadzone": 0.1
+      },
+      "Front Touch X": {
+        "Value": "WMouse X",
+        "Mult": 1.0,
+        "Deadzone": 0.0
+      },
+      "Front Touch Y": {
+        "Value": "WMouse Y",
+        "Mult": 1.0,
+        "Deadzone": 0.0
+      }
+    }
+  }
+}

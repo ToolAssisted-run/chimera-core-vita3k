@@ -5,7 +5,11 @@
 # Vita3K program; CMAKE_SOURCE_DIR is extern/vita3k.
 set(W ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(GEN ${W}/../build/generated-gl)
-set(MB "$ENV{HOME}/chimera/extern/chimera-common-minibox" CACHE PATH "miniBox checkout")
+if(DEFINED ENV{MINIBOX_DIR})
+	set(MB "$ENV{MINIBOX_DIR}" CACHE PATH "miniBox checkout")
+else()
+	set(MB "$ENV{HOME}/chimera/extern/chimera-common-minibox" CACHE PATH "miniBox checkout")
+endif()
 
 add_library(vita3k-guest-core STATIC
 	${CMAKE_SOURCE_DIR}/vita3k/interface.cpp

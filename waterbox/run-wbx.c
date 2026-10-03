@@ -142,9 +142,20 @@ int main(int argc, char **argv)
 	memreader sr = { (const uint8_t *)settings, strlen(settings), 0 };
 	wbx_mount_file(g_host, "settings", mem_reader, (uintptr_t)&sr, false, &r);
 	if (r.error_message[0]) { fprintf(stderr, "mount settings: %s\n", r.error_message); return 1; }
+	for (int f = 0; f < o.firmware_n; f++) {
+		wbx_mount_file_path(g_host, o.firmware_id[f], o.firmware_path[f], &r);
+		if (r.error_message[0]) { fprintf(stderr, "mount %s: %s\n", o.firmware_id[f], r.error_message); return 1; }
+	}
+	/* the slot map a project mounts, and the save data under its own name */
+	static char slots[8192], savename[1024];
+	harness_slots(&o, base, slots, sizeof slots);
+	memreader slr = { (const uint8_t *)slots, strlen(slots), 0 };
+	wbx_mount_file(g_host, "slots", mem_reader, (uintptr_t)&slr, false, &r);
+	if (r.error_message[0]) { fprintf(stderr, "mount slots: %s\n", r.error_message); return 1; }
 	if (o.savedata_in) {
-		wbx_mount_file_path(g_host, "savedata", o.savedata_in, &r);
-		if (r.error_message[0]) { fprintf(stderr, "mount savedata: %s\n", r.error_message); return 1; }
+		snprintf(savename, sizeof savename, "/%s", harness_base(o.savedata_in));
+		wbx_mount_file_path(g_host, savename, o.savedata_in, &r);
+		if (r.error_message[0]) { fprintf(stderr, "mount %s: %s\n", savename, r.error_message); return 1; }
 	}
 	wbx_activate_host(g_host, &r);
 
@@ -183,6 +194,7 @@ int main(int argc, char **argv)
 		(const char *(*)(int32_t))proc("GetSaveDataFileName"),
 		(int64_t (*)(int32_t))proc("GetSaveDataFileSize"),
 		(const uint8_t *(*)(int32_t))proc("GetSaveDataFileBuffer"),
+		(void (*)(int))proc("SetRenderingEnabled"),
 	};
 	const int rc = harness_run(&c, &o, base);
 	if (getenv("CHIMERA_LIST_FILES"))

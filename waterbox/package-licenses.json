@@ -1,0 +1,191 @@
+{
+ "package": "vita3k",
+ "effectiveTerms": "GPL-2.0-or-later",
+ "commercialUse": "allowed under the GPL",
+ "note": "The built core combines this repository's integration (MIT) with Vita3K, which is GPL-2.0-or-later, and the libraries it links: FFmpeg (LGPL-2.1-or-later, configured without its GPL or non-free parts) and substitute (LGPL-2.1-or-later with a static-linking exception), and everything else permissive or public domain. One component states no licence: psvpfstools (Vita3K's fork of motoharu's PFS tools, which decrypts NoNpDRM dumps), shipped by the Vita3K team in every Vita3K release; its source is linked here. Vita3K's own static assets (shaders, data) are built in. The package carries no Sony firmware, no fonts and no game: the system software and the font package are firmware the project supplies.",
+ "components": [
+  {
+   "name": "chimera-core-vita3k (integration)",
+   "license": "MIT, and Vita3K's terms (GPL-2.0-or-later) for patches/",
+   "url": "https://github.com/ToolAssisted-run/chimera-core-vita3k",
+   "commit": "{selfCommit}",
+   "file": "LICENSE",
+   "sourceUrl": "https://github.com/ToolAssisted-run/chimera-core-vita3k/archive/{commit}.tar.gz"
+  },
+  {
+   "name": "Vita3K",
+   "license": "GPL-2.0-or-later",
+   "url": "https://github.com/Vita3K/Vita3K",
+   "commit": "{submodule:extern/vita3k}",
+   "file": "extern/vita3k/COPYING.txt",
+   "sourceUrl": "https://github.com/Vita3K/Vita3K/archive/{commit}.tar.gz"
+  },
+  {
+   "name": "dynarmic",
+   "license": "0BSD",
+   "url": "https://github.com/Vita3K/dynarmic",
+   "commit": "{submodule:extern/vita3k/external/dynarmic}",
+   "file": "extern/vita3k/external/dynarmic/LICENSE.txt"
+  },
+  {
+   "name": "mcl (dynarmic)",
+   "license": "MIT",
+   "url": "https://github.com/azahar-emu/mcl",
+   "file": "extern/vita3k/external/dynarmic/externals/mcl/LICENSE"
+  },
+  {
+   "name": "Zydis (dynarmic)",
+   "license": "MIT",
+   "url": "https://github.com/zyantific/zydis",
+   "file": "extern/vita3k/external/dynarmic/externals/zydis/LICENSE"
+  },
+  {
+   "name": "Boost.Filesystem",
+   "license": "BSL-1.0",
+   "url": "https://www.boost.org",
+   "commit": "{submodule:extern/vita3k/external/boost}",
+   "file": "extern/vita3k/external/boost/LICENSE_1_0.txt"
+  },
+  {
+   "name": "FFmpeg",
+   "license": "LGPL-2.1-or-later",
+   "url": "https://ffmpeg.org",
+   "version": "7.1.2 (configured without --enable-gpl or --enable-nonfree; waterbox/build-deps.sh)",
+   "file": "build/deps/ffmpeg-7.1.2/COPYING.LGPLv2.1",
+   "sourceUrl": "https://ffmpeg.org/releases/ffmpeg-7.1.2.tar.xz"
+  },
+  {
+   "name": "OpenSSL",
+   "license": "Apache-2.0",
+   "url": "https://www.openssl.org",
+   "version": "3.0.15",
+   "file": "build/deps/openssl-guest-obj/LICENSE.txt",
+   "sourceUrl": "https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz"
+  },
+  {
+   "name": "zlib (psvpfstools' copy)",
+   "license": "Zlib",
+   "url": "https://zlib.net",
+   "commit": "{submodule:extern/vita3k/external/psvpfstools}",
+   "file": "extern/vita3k/external/psvpfstools/zlib/README"
+  },
+  {
+   "name": "SDL3",
+   "license": "Zlib",
+   "url": "https://www.libsdl.org",
+   "commit": "{submodule:extern/vita3k/external/sdl}",
+   "file": "extern/vita3k/external/sdl/LICENSE.txt"
+  },
+  {
+   "name": "fmt",
+   "license": "MIT",
+   "url": "https://github.com/fmtlib/fmt",
+   "commit": "{submodule:extern/vita3k/external/fmt}",
+   "file": "extern/vita3k/external/fmt/LICENSE"
+  },
+  {
+   "name": "spdlog",
+   "license": "MIT",
+   "url": "https://github.com/gabime/spdlog",
+   "commit": "{submodule:extern/vita3k/external/spdlog}",
+   "file": "extern/vita3k/external/spdlog/LICENSE"
+  },
+  {
+   "name": "SPIRV-Cross",
+   "license": "Apache-2.0",
+   "url": "https://github.com/KhronosGroup/SPIRV-Cross",
+   "commit": "{submodule:extern/vita3k/external/SPIRV-Cross}",
+   "file": "extern/vita3k/external/SPIRV-Cross/LICENSE"
+  },
+  {
+   "name": "glslang",
+   "license": "BSD-3-Clause, and the other permissive terms its LICENSE.txt lists",
+   "url": "https://github.com/KhronosGroup/glslang",
+   "commit": "{submodule:extern/vita3k/external/glslang}",
+   "file": "extern/vita3k/external/glslang/LICENSE.txt"
+  },
+  {
+   "name": "yaml-cpp",
+   "license": "MIT",
+   "url": "https://github.com/jbeder/yaml-cpp",
+   "commit": "{submodule:extern/vita3k/external/yaml-cpp}",
+   "file": "extern/vita3k/external/yaml-cpp/LICENSE"
+  },
+  {
+   "name": "pugixml",
+   "license": "MIT",
+   "url": "https://github.com/zeux/pugixml",
+   "commit": "{submodule:extern/vita3k/external/pugixml}",
+   "file": "extern/vita3k/external/pugixml/LICENSE.md"
+  },
+  {
+   "name": "xxHash",
+   "license": "BSD-2-Clause",
+   "url": "https://github.com/Cyan4973/xxHash",
+   "commit": "{submodule:extern/vita3k/external/xxHash}",
+   "file": "extern/vita3k/external/xxHash/LICENSE"
+  },
+  {
+   "name": "miniz",
+   "license": "MIT",
+   "url": "https://github.com/richgel999/miniz",
+   "commit": "{submodule:extern/vita3k/external/miniz}",
+   "file": "extern/vita3k/external/miniz/LICENSE"
+  },
+  {
+   "name": "LibAtrac9",
+   "license": "MIT",
+   "url": "https://github.com/Thealexbarney/LibAtrac9",
+   "commit": "{submodule:extern/vita3k/external/LibAtrac9}",
+   "file": "extern/vita3k/external/LibAtrac9/LICENSE"
+  },
+  {
+   "name": "libfat16",
+   "license": "MIT",
+   "url": "https://github.com/Vita3K/libfat16",
+   "commit": "{submodule:extern/vita3k/external/libfat16}",
+   "file": "extern/vita3k/external/libfat16/LICENSE"
+  },
+  {
+   "name": "substitute",
+   "license": "LGPL-2.1-or-later with a static-linking exception (substitute.h and generated files public domain)",
+   "url": "https://github.com/comex/substitute",
+   "commit": "{submodule:extern/vita3k/external/substitute}",
+   "file": "extern/vita3k/external/substitute/LICENSE.txt"
+  },
+  {
+   "name": "stb_image",
+   "license": "MIT or public domain",
+   "url": "https://github.com/nothings/stb",
+   "commit": "{submodule:extern/vita3k/external/stb}",
+   "file": "extern/vita3k/external/stb/LICENSE"
+  },
+  {
+   "name": "dlmalloc",
+   "license": "CC0-1.0 (public domain, as its header says)",
+   "url": "https://github.com/greg7mdp/dlmalloc",
+   "commit": "{submodule:extern/vita3k/external/dlmalloc}",
+   "file": "extern/vita3k/external/dlmalloc/dlmalloc.h"
+  },
+  {
+   "name": "glad (Vita3K's OpenGL loader, generated)",
+   "license": "generated code, public domain / MIT; the Khronos headers it carries are Apache-2.0",
+   "url": "https://github.com/Dav1dde/glad",
+   "file": "extern/vita3k/external/glad/include/KHR/khrplatform.h"
+  },
+  {
+   "name": "libb64 (psvpfstools)",
+   "license": "public domain",
+   "url": "https://libb64.sourceforge.net",
+   "commit": "{submodule:extern/vita3k/external/psvpfstools}",
+   "file": "extern/vita3k/external/psvpfstools/libb64/LICENSE"
+  },
+  {
+   "name": "psvpfstools (psvpfsparser, libzRIF)",
+   "license": "no licence stated",
+   "url": "https://github.com/Vita3K/psvpfstools",
+   "commit": "{submodule:extern/vita3k/external/psvpfstools}",
+   "sourceUrl": "https://github.com/Vita3K/psvpfstools/archive/{commit}.tar.gz"
+  }
+ ]
+}

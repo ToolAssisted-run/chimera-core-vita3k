@@ -291,7 +291,9 @@ mem_dir *dir_of(DIR *d) {
     return g_dirs.count(d) ? static_cast<mem_dir *>(static_cast<void *>(d)) : nullptr;
 }
 
-DIR *mem_opendir(const char *path) {
+// A stream over a directory; `fd` >= 0 is a descriptor of it the stream
+// takes over (fdopendir), otherwise it opens its own.
+DIR *mem_opendir(const char *path, int fd = -1) {
     TRACE("memfs: opendir %s\n", path);
     std::lock_guard lock(g_lock);
     auto n = lookup(path);
@@ -319,11 +321,15 @@ DIR *mem_opendir(const char *path) {
         add(name, *c);
     for (size_t i = 0; i < d->entries.size(); i++)
         d->entries[i].d_off = static_cast<off_t>(i + 1);
-    open_file f;
-    f.n = n;
-    f.flags = O_RDONLY | O_DIRECTORY;
-    f.path = normalised(path);
-    d->fd = new_fd(std::move(f));
+    if (fd >= 0)
+        d->fd = fd;
+    else {
+        open_file f;
+        f.n = n;
+        f.flags = O_RDONLY | O_DIRECTORY;
+        f.path = normalised(path);
+        d->fd = new_fd(std::move(f));
+    }
     g_dirs.insert(d);
     return static_cast<DIR *>(static_cast<void *>(d));
 }
@@ -953,6 +959,84 @@ int truncate64(const char *path, off_t len) {
 }
 #endif
 
+// libstdc++'s std::filesystem::copy_file copies between two descriptors
+// with these; either of ours is a copy through read and write, which serve
+// both kinds of descriptor
+namespace {
+ssize_t copy_fds(int in, off64_t *in_off, int out, off64_t *out_off, size_t count) {
+    char buf[65536];
+    size_t done = 0;
+    while (done < count) {
+        const size_t want = std::min(sizeof buf, count - done);
+        const ssize_t got = in_off ? pread(in, buf, want, *in_off) : read(in, buf, want);
+        if (got < 0)
+            return done ? static_cast<ssize_t>(done) : -1;
+        if (got == 0)
+            break;
+        for (ssize_t put = 0; put < got;) {
+            const ssize_t w = out_off ? pwrite(out, buf + put, got - put, *out_off) : write(out, buf + put, got - put);
+            if (w <= 0)
+                return done ? static_cast<ssize_t>(done) : -1;
+            put += w;
+            if (out_off)
+                *out_off += w;
+        }
+        if (in_off)
+            *in_off += got;
+        done += static_cast<size_t>(got);
+    }
+    return static_cast<ssize_t>(done);
+}
+} // namespace
+
+ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count) {
+    if (is_ours(out_fd) || is_ours(in_fd)) {
+        off64_t off = offset ? *offset : 0;
+        const ssize_t n = copy_fds(in_fd, offset ? &off : nullptr, out_fd, nullptr, count);
+        if (offset)
+            *offset = static_cast<off_t>(off);
+        return n;
+    }
+    return static_cast<ssize_t>(syscall(SYS_sendfile, out_fd, in_fd, offset, count));
+}
+
+#ifndef CHIMERA_GUEST
+// glibc's name for the same call (musl's off_t is 64-bit already)
+ssize_t sendfile64(int out_fd, int in_fd, off64_t *offset, size_t count) {
+    if (is_ours(out_fd) || is_ours(in_fd))
+        return copy_fds(in_fd, offset, out_fd, nullptr, count);
+    return static_cast<ssize_t>(syscall(SYS_sendfile, out_fd, in_fd, offset, count));
+}
+#endif
+
+ssize_t copy_file_range(int fd_in, off64_t *off_in, int fd_out, off64_t *off_out, size_t len, unsigned int flags) {
+    if (is_ours(fd_in) || is_ours(fd_out))
+        return copy_fds(fd_in, off_in, fd_out, off_out, len);
+#ifdef SYS_copy_file_range
+    return static_cast<ssize_t>(syscall(SYS_copy_file_range, fd_in, off_in, fd_out, off_out, len, flags));
+#else
+    return fail(ENOSYS);
+#endif
+}
+
+// Advice about how a file will be read (libstdc++'s copy_file gives it):
+// nothing to act on in the tree, and the sandbox has no such call at all.
+int posix_fadvise(int fd, off_t offset, off_t len, int advice) {
+#ifdef CHIMERA_GUEST
+    return 0;
+#else
+    if (is_ours(fd))
+        return 0;
+    return syscall(SYS_fadvise64, fd, offset, len, advice) == 0 ? 0 : errno;
+#endif
+}
+
+#ifndef CHIMERA_GUEST
+int posix_fadvise64(int fd, off64_t offset, off64_t len, int advice) {
+    return posix_fadvise(fd, offset, len, advice);
+}
+#endif
+
 int fsync(int fd) {
     return is_ours(fd) ? 0 : static_cast<int>(syscall(SYS_fsync, fd));
 }
@@ -1048,10 +1132,9 @@ DIR *fdopendir(int fd) {
             }
             path = f->path;
         }
-        DIR *d = mem_opendir(path.c_str());
-        if (d)
-            close(fd); // the stream holds its own descriptor
-        return d;
+        // the stream takes the descriptor over, as POSIX has it: dirfd()
+        // answers it, and closedir() closes it
+        return mem_opendir(path.c_str(), fd);
     }
 #ifndef CHIMERA_GUEST
     HOST(fdopendir);

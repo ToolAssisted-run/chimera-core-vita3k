@@ -92,6 +92,8 @@ void BridgeFrame::lost_context() {
 }
 
 void BridgeFrame::swap_buffers() {
+    if (!readback)
+        return;
     const size_t stride = static_cast<size_t>(width) * 4;
     rows.resize(stride * height);
     int previous = 0;

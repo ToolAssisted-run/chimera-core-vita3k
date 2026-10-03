@@ -15,12 +15,18 @@ namespace chimera_vita3k {
 struct Options {
     uint64_t cpu_mhz = 0; // 0: the machine's (1332)
     uint64_t rtc_start = 0; // Unix seconds; 0: the machine's (2013-01-01)
+    int language = 1; // SceSystemParamLang: 1 is English (United States)
+    int enter_button = 1; // SceSystemParamEnterButtonAssign: 1 Cross, 0 Circle
     // the gate's negative control: the GPU's pictures stay on the GPU, and a
     // state cannot hold them
     bool no_surface_sync = false;
     // a zip of save data to unpack before the machine starts (savedata.h): a
     // path natively, a mounted file's name in the sandbox; empty for none
     std::string savedata;
+    // the system software and the font package (.PUP), installed into the
+    // machine before the app when present: paths natively, mounted names in
+    // the sandbox
+    std::vector<std::string> firmware;
 };
 
 // The controls, in the order waterbox.config declares them: the buttons as
@@ -40,6 +46,10 @@ void set_input(uint64_t buttons, const int32_t axes[AXES]);
 // Boot the app read from `host_name` (a path natively, a mounted file's name
 // in the sandbox). This thread becomes the machine's thread 0.
 bool boot(const std::string &host_name, const Options &options, BridgeFrame &frame, std::string &error);
+
+// Turbo: whether each present is read back into the picture. The drawing
+// goes on either way - with surface sync it is part of the machine.
+void set_rendering(bool on);
 
 // One frame: frame f ends 2 us after vblank f, at f/60 s of machine time.
 // The touch panels and motion sensors are sampled as it starts, so the whole
@@ -61,6 +71,15 @@ uint64_t frames();
 uint64_t exited_at(); // the frame the app exited in, or 0
 uint64_t time_ns();
 uint64_t switches();
+
+// The machine's memory as an address space, for the frontend's RAM tools:
+// the Vita's 4 GiB, resolved a page at a time. A page the machine has not
+// allocated reads 0 and takes no write.
+constexpr uint64_t BUS_SIZE = 1ull << 32;
+bool bus_ready();
+uint8_t bus_peek(uint32_t addr);
+void bus_poke(uint32_t addr, uint8_t value);
+void bus_read(uint64_t addr, uint8_t *out, size_t len);
 
 // The machine's log so far.
 bool log(std::vector<uint8_t> &out);

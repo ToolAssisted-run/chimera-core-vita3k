@@ -6,7 +6,8 @@
  *        [--digest-every N] [--screenshot F=PATH]... [--cpu-mhz N] [--rtc-start S]
  *        [--rerecord] [--save-state FILE] [--state FILE]   (states: run-wbx only)
  *        [--no-surface-sync] [--input FILE] [--audio-out FILE]
- *        [--savedata-in ZIP] [--savedata-out DIR]
+ *        [--savedata-in ZIP] [--savedata-out DIR] [--language L] [--enter-button B]
+ *        [--turbo A:B] [--firmware ID=PATH]...
  *
  * --rerecord saves and loads a state before every frame; --save-state writes
  * the machine after the last frame, --state starts from one, so another
@@ -20,8 +21,11 @@
  * # lines ignored) give the packed button mask and every axis, in the
  * declared order and units, from frame F on, until a later line. Without it
  * the controls rest. --audio-out writes the sound, S16 stereo at 48 kHz.
- * --savedata-in mounts a zip as "savedata" before Init; --savedata-out
- * writes the machine's save data export into DIR after the run.
+ * The runners name the app and any --savedata-in zip in a "slots" map, as a
+ * project does; --savedata-out writes the machine's save data export into
+ * DIR after the run. --language and --enter-button are those settings;
+ * --turbo turns rendering off for frames A..B-1. --firmware mounts a file
+ * under a firmware id (PSVUPDAT.PUP, PSP2UPDAT.PUP), as the frontend does.
  *
  * Lines: "frame F time_ns=T video=H audio=H/N read=R" every --digest-every
  * frames (N pairs of sound, R whether input was read), then "app=NAME
@@ -54,6 +58,10 @@ struct harness_opts {
 	int rerecord, no_surface_sync;
 	const char *save_state, *load_state;
 	const char *input, *audio_out, *savedata_in, *savedata_out;
+	const char *language, *enter_button;
+	int firmware_n;
+	const char *firmware_id[4], *firmware_path[4];
+	uint64_t turbo_from, turbo_to;
 	int shots;
 	uint64_t shot_frame[HARNESS_MAX_SHOTS];
 	const char *shot_path[HARNESS_MAX_SHOTS];
@@ -85,6 +93,7 @@ struct harness_core {
 	const char *(*savedata_name)(int32_t);
 	int64_t (*savedata_size)(int32_t);
 	const uint8_t *(*savedata_buffer)(int32_t);
+	void (*set_rendering)(int);
 };
 
 static int harness_parse(int argc, char **argv, struct harness_opts *o)
@@ -106,6 +115,18 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 		else if (!strcmp(a, "--audio-out") && i + 1 < argc) o->audio_out = argv[++i];
 		else if (!strcmp(a, "--savedata-in") && i + 1 < argc) o->savedata_in = argv[++i];
 		else if (!strcmp(a, "--savedata-out") && i + 1 < argc) o->savedata_out = argv[++i];
+		else if (!strcmp(a, "--language") && i + 1 < argc) o->language = argv[++i];
+		else if (!strcmp(a, "--firmware") && i + 1 < argc && o->firmware_n < 4) {
+			char *spec = argv[++i], *eq = strchr(spec, '=');
+			if (!eq) { fprintf(stderr, "--firmware wants ID=PATH\n"); return 0; }
+			*eq = '\0';
+			o->firmware_id[o->firmware_n] = spec;
+			o->firmware_path[o->firmware_n++] = eq + 1;
+		}
+		else if (!strcmp(a, "--enter-button") && i + 1 < argc) o->enter_button = argv[++i];
+		else if (!strcmp(a, "--turbo") && i + 1 < argc) {
+			if (sscanf(argv[++i], "%" SCNu64 ":%" SCNu64, &o->turbo_from, &o->turbo_to) != 2) { fprintf(stderr, "--turbo wants A:B\n"); return 0; }
+		}
 		else if (!strcmp(a, "--save-state") && i + 1 < argc) o->save_state = argv[++i];
 		else if (!strcmp(a, "--state") && i + 1 < argc) o->load_state = argv[++i];
 		else if (!strcmp(a, "--screenshot") && i + 1 < argc && o->shots < HARNESS_MAX_SHOTS) {
@@ -121,7 +142,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 		fprintf(stderr, "usage: %s <app.vpk> --work <dir> [--frames N] [--timeout S] [--digest-every N]"
 			" [--screenshot F=PATH]... [--cpu-mhz N] [--rtc-start S] [--rerecord] [--save-state FILE]"
 			" [--state FILE] [--no-surface-sync] [--input FILE] [--audio-out FILE] [--savedata-in ZIP]"
-			" [--savedata-out DIR]\n", argv[0]);
+			" [--savedata-out DIR] [--language L] [--enter-button B] [--turbo A:B]\n", argv[0]);
 		return 0;
 	}
 	return 1;
@@ -146,6 +167,8 @@ static inline void harness_absolute(struct harness_opts *o)
 	o->audio_out = harness_abs(o->audio_out);
 	o->savedata_in = harness_abs(o->savedata_in);
 	o->savedata_out = harness_abs(o->savedata_out);
+	for (int f = 0; f < o->firmware_n; f++)
+		o->firmware_path[f] = harness_abs(o->firmware_path[f]);
 	for (int s = 0; s < o->shots; s++)
 		o->shot_path[s] = harness_abs(o->shot_path[s]);
 }
@@ -200,8 +223,26 @@ static int harness_savedata_out(const struct harness_core *c, const char *dir)
 /* The settings object both flavours read, as the frontend would mount it. */
 static void harness_settings(const struct harness_opts *o, char *buf, size_t n)
 {
-	snprintf(buf, n, "{\"cpu_mhz\": \"%" PRIu64 "\", \"rtc_start\": \"%" PRIu64 "\", \"no_surface_sync\": \"%d\"}",
+	int k = snprintf(buf, n, "{\"cpu_mhz\": \"%" PRIu64 "\", \"rtc_start\": \"%" PRIu64 "\", \"no_surface_sync\": \"%d\"",
 		o->cpu_mhz, o->rtc_start, o->no_surface_sync);
+	if (o->language) k += snprintf(buf + k, n - k, ", \"language\": \"%s\"", o->language);
+	if (o->enter_button) k += snprintf(buf + k, n - k, ", \"enter_button\": \"%s\"", o->enter_button);
+	snprintf(buf + k, n - k, "}");
+}
+
+static const char *harness_base(const char *path)
+{
+	const char *s = strrchr(path, '/');
+	return s ? s + 1 : path;
+}
+
+/* The slot map a project would mount: the app (named `game`, as the runner
+ * mounts it) and the save data zip, under its own name. */
+static void harness_slots(const struct harness_opts *o, const char *game, char *buf, size_t n)
+{
+	int k = snprintf(buf, n, "{\"game\": [\"%s\"]", game);
+	if (o->savedata_in) k += snprintf(buf + k, n - k, ", \"savedata\": [\"%s\"]", harness_base(o->savedata_in));
+	snprintf(buf + k, n - k, "}");
 }
 
 /* A fresh work directory: made, or emptied when it carries our mark. */
@@ -260,8 +301,12 @@ static int harness_run(const struct harness_core *c, const struct harness_opts *
 {
 	alarm((unsigned)o->timeout);
 	if (!c->init()) {
-		fprintf(stderr, "Init failed: %s\n", c->load_error());
-		harness_save_log(c, o);
+		/* no load error at all: the guest died inside Init (miniBox said
+		 * why), and nothing more may be asked of it */
+		const char *why = c->load_error();
+		fprintf(stderr, "Init failed: %s\n", why ? why : "the machine died (see above)");
+		if (why)
+			harness_save_log(c, o);
 		return 6;
 	}
 	const int states = o->rerecord || o->save_state || o->load_state;
@@ -314,6 +359,8 @@ static int harness_run(const struct harness_core *c, const struct harness_opts *
 			for (int a = 0; a < HARNESS_AXES; a++)
 				c->set_axis(a, cur->axes[a]);
 		}
+		if (o->turbo_to > o->turbo_from)
+			c->set_rendering(next >= o->turbo_from && next < o->turbo_to ? 0 : 1);
 		c->frame_advance(mask);
 		if (c->exited_at())
 			break;

@@ -7,8 +7,10 @@
 #
 #   run-gate.sh [-n]    -n: do not build (use build/native and build/testapps)
 #
-# A leg prints PASS or FAIL and one line of evidence; the exit status is the
-# number of failed legs.
+# A leg prints PASS, FAIL or SKIP and one line of evidence; the exit status
+# is the number of failed legs. Games and firmware are nobody's to put in a
+# repository: the legs that need them look in build/content (or
+# VITA3K_CONTENT) and SKIP, saying what they lacked, when it is not there.
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(dirname "$here")"
@@ -17,12 +19,18 @@ wbx="$root/build/wbx/run-wbx"
 core="$root/build/wbx/core.wbx"
 apps="$root/build/testapps"
 work="$root/build/gate"
+chimera_root="${CHIMERA_ROOT:-$HOME/chimera}"
+engine="$chimera_root/build/meson-linux/chimera-run"
+pkg="$root/build/package/vita3k.chimeraCore"
+content="${VITA3K_CONTENT:-$root/build/content}"
 
 if [ "${1:-}" != "-n" ]; then
 	sh "$here/build-testapps.sh" >/dev/null || { echo "FAIL the test apps did not build"; exit 1; }
 	sh "$here/build-native.sh" >"$root/build/native-build.log" 2>&1 || { echo "FAIL the native reference did not build (build/native-build.log)"; exit 1; }
 	sh "$here/build-guest.sh" >"$root/build/guest-build.log" 2>&1 || { echo "FAIL the guest did not build (build/guest-build.log)"; exit 1; }
 	sh "$here/build-core.sh" >"$root/build/core-link.log" 2>&1 || { echo "FAIL core.wbx did not link (build/core-link.log)"; exit 1; }
+	sh "$here/build-package.sh" -n -r "$chimera_root" >"$root/build/package.log" 2>&1 || { echo "FAIL the package did not build (build/package.log)"; exit 1; }
+	echo "PASS the package builds: $(grep -o 'package sha1 [0-9a-f]*' "$root/build/package.log")"
 fi
 mkdir -p "$work"
 unset DISPLAY
@@ -30,11 +38,14 @@ unset DISPLAY
 fails=0
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; fails=$((fails + 1)); }
+skip() { echo "SKIP $*"; }
 
-# <name> <vpk> <frames> [run-native options...]: the run's output in $work/<name>.out
+# <name> <vpk> <frames> [run-native options...]: the run's output in
+# $work/<name>.out; a vpk is a test app's name, or a path from /
 native() {
 	name="$1"; vpk="$2"; frames="$3"; shift 3
-	"$run" "$apps/$vpk" --work "$work/$name-work" --frames "$frames" --timeout 600 --digest-every 10 "$@" \
+	case "$vpk" in /*) ;; *) vpk="$apps/$vpk" ;; esac
+	"$run" "$vpk" --work "$work/$name-work" --frames "$frames" --timeout 900 --digest-every 10 "$@" \
 		>"$work/$name.out" 2>"$work/$name.err"
 	echo $?
 }
@@ -42,7 +53,8 @@ native() {
 # the same, in the sandbox
 sandboxed() {
 	name="$1"; vpk="$2"; frames="$3"; shift 3
-	"$wbx" "$core" "$apps/$vpk" --work "$work/$name-work" --frames "$frames" --timeout 900 --digest-every 10 "$@" \
+	case "$vpk" in /*) ;; *) vpk="$apps/$vpk" ;; esac
+	"$wbx" "$core" "$vpk" --work "$work/$name-work" --frames "$frames" --timeout 900 --digest-every 10 "$@" \
 		>"$work/$name.out" 2>"$work/$name.err"
 	echo $?
 }
@@ -139,11 +151,11 @@ rw=$(sandboxed inputtest-reload inputtest.vpk 40 --savedata-in "$work/inputtest-
 rn=$(native inputtest-reload-n inputtest.vpk 40 --savedata-in "$work/inputtest-save.zip" --savedata-out "$work/inputtest-reload-n-sd")
 log="$work/inputtest-reload-sd/data/inputtest/input.txt"
 count=$(od -An -td4 "$work/inputtest-reload-sd/savedata/CHMR00002/count.bin" 2>/dev/null | tr -d ' ')
-if [ "$rw" = 0 ] && [ "$rn" = 0 ] && [ "$(head -1 "$log")" = "loaded 1" ] && grep -qx "saved 2" "$log" && [ "$count" = 2 ] \
+if [ "$rw" = 0 ] && [ "$rn" = 0 ] && [ "$(grep -m1 '^loaded' "$log")" = "loaded 1" ] && grep -qx "saved 2" "$log" && [ "$count" = 2 ] \
 	&& diff -r "$work/inputtest-reload-sd" "$work/inputtest-reload-n-sd" >/dev/null; then
 	pass "save data round trip: the export, zipped, starts a run that loads count 1 and saves 2 (native == sandbox)"
 else
-	fail "save data did not come back in (exit $rw, $rn; first line '$(head -1 "$log" 2>/dev/null)', count '$count')"
+	fail "save data did not come back in (exit $rw, $rn; '$(grep -m1 '^loaded' "$log" 2>/dev/null)', count '$count')"
 fi
 r=$(sandboxed inputtest-refuse inputtest.vpk 5 --savedata-in "$work/not-a-save.zip")
 if [ "$r" = 6 ] && grep -q "not a Vita save" "$work/inputtest-refuse.err"; then
@@ -166,6 +178,90 @@ elif ! cmp -s "$work/threadtest-rerecord.want" "$work/threadtest-rerecord.got"; 
 else
 	pass "threadtest with a state saved and loaded before every frame == the native run, $(grep -c 'rebuilding every GL object' "$work/threadtest-rerecord-work/vita3k.log") GL rebuilds in 100 frames"
 fi
+# The package declares what the core reads (controls in order, firmware ids,
+# settings, language options, keybinds, slots) - and the check sees a swap.
+if python3 "$here/tests/check-declaration.py" "$here" >"$work/declaration.txt"; then
+	pass "$(tail -1 "$work/declaration.txt")"
+else
+	fail "the declaration and the core disagree - $(head -1 "$work/declaration.txt")"
+fi
+rm -rf "$work/decl-neg" && mkdir -p "$work/decl-neg/driver"
+cp "$here/file_slots.json" "$here/default_keybinds.json" "$work/decl-neg/"
+cp "$here/driver/vita3k_driver.h" "$here/driver/wbx-entry.cpp" "$work/decl-neg/driver/"
+sed 's/"Cross",/"CROSS_",/; s/"Circle",/"Cross",/; s/"CROSS_",/"Circle",/' "$here/waterbox.config" >"$work/decl-neg/waterbox.config"
+if ! python3 "$here/tests/check-declaration.py" "$work/decl-neg" >/dev/null; then
+	pass "the declaration check sees Cross and Circle swapped"
+else
+	fail "the declaration check passes Cross and Circle swapped"
+fi
+
+# Settings reach the machine: InputTest's first line is the language and
+# enter button it was given (the Vita's own values).
+r=$(sandboxed inputtest-ja inputtest.vpk 20 --language japanese --enter-button circle --savedata-out "$work/inputtest-ja-sd")
+first=$(head -1 "$work/inputtest-ja-sd/data/inputtest/input.txt" 2>/dev/null)
+default=$(head -1 "$work/inputtest-oracle-sd/data/inputtest/input.txt" 2>/dev/null)
+if [ "$r" = 0 ] && [ "$first" = "system lang=0 enter=0" ] && [ "$default" = "system lang=1 enter=1" ]; then
+	pass "settings reach the machine: Japanese and Circle read '$first', the defaults '$default'"
+else
+	fail "settings did not reach the machine (exit $r): '$first' and '$default'"
+fi
+
+# Turbo: rendering off for frames 100..199 leaves the machine exactly as it
+# was - time, sound and input in every frame, the pictures outside the window.
+r=$(sandboxed threadtest-turbo threadtest.vpk 300 --turbo 100:200)
+sed 's/ video=[0-9a-f]*//' "$work/threadtest-a.out" >"$work/threadtest-machine.want"
+sed 's/ video=[0-9a-f]*//' "$work/threadtest-turbo.out" >"$work/threadtest-machine.got"
+outside=$(awk '/^frame/ && ($2 < 100 || $2 >= 200)' "$work/threadtest-a.out")
+outside_turbo=$(awk '/^frame/ && ($2 < 100 || $2 >= 200)' "$work/threadtest-turbo.out")
+if [ "$r" = 0 ] && cmp -s "$work/threadtest-machine.want" "$work/threadtest-machine.got" && [ "$outside" = "$outside_turbo" ]; then
+	pass "turbo for frames 100..199: the machine the same in every frame, the pictures outside the window; $(diff "$work/threadtest-a.out" "$work/threadtest-turbo.out" | grep -c '^>') pictures in it stood still"
+else
+	fail "turbo changed the machine (exit $r) - $(diff "$work/threadtest-machine.want" "$work/threadtest-machine.got" | sed -n 2p)"
+fi
+
+# The package through Chimera's own engine: InputTest driven by a movie of
+# the oracle's script, its record out through the engine's save data export.
+if [ -x "$engine" ] && [ -f "$pkg" ]; then
+	python3 "$oracle" movie "$script" 300 "$work/engine.movie"
+	rm -rf "$work/engine-sd"
+	"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --gpu --export-savedata "$work/engine-sd" >"$work/engine.out" 2>&1
+	r=$?
+	verdict=$(python3 "$oracle" check "$script" "$work/engine-sd/data/inputtest/input.txt" 2>&1 | tail -1)
+	if [ "$r" = 0 ] && grep -q '^frames=300' "$work/engine.out" && python3 "$oracle" check "$script" "$work/engine-sd/data/inputtest/input.txt" >/dev/null; then
+		pass "the package in chimera-run: 300 frames of a movie, $verdict"
+	else
+		fail "the package in chimera-run (exit $r): $verdict; see build/gate/engine.out"
+	fi
+else
+	skip "the package in chimera-run: no $engine or package"
+fi
+
+# Games, where they are: the firmware installed into the machine before the
+# game, the game the same native and sandboxed. Alien Shooter is Playable on
+# Vita3K's list, and runs with the font package alone.
+game="$content/alien-shooter.zip"
+fonts="$content/PSP2UPDAT.PUP"
+if [ -f "$game" ] && [ -f "$fonts" ]; then
+	(native alien-shooter-n "$game" 300 --firmware PSP2UPDAT.PUP="$fonts" >"$work/alien-shooter-n.rc") &
+	rw=$(sandboxed alien-shooter-w "$game" 300 --firmware PSP2UPDAT.PUP="$fonts")
+	wait
+	rn=$(cat "$work/alien-shooter-n.rc")
+	pics=$(grep -o 'video=[0-9a-f]*' "$work/alien-shooter-w.out" | sort -u | wc -l)
+	if [ "$rn" = 0 ] && [ "$rw" = 0 ] && cmp -s "$work/alien-shooter-n.out" "$work/alien-shooter-w.out" && [ "$pics" -ge 3 ]; then
+		pass "Alien Shooter: native == sandbox in all 300 frames, $pics pictures; $(tail -1 "$work/alien-shooter-w.out" | grep -o 'switches=[0-9]*')"
+	else
+		fail "Alien Shooter: native and sandbox differ, or it drew $pics pictures (exit $rn, $rw) - $(diff "$work/alien-shooter-n.out" "$work/alien-shooter-w.out" | sed -n 2p)"
+	fi
+	r=$(sandboxed swapped-pup "$game" 2 --firmware PSVUPDAT.PUP="$fonts")
+	if [ "$r" = 6 ] && grep -q "is it the font package" "$work/swapped-pup.err"; then
+		pass "the font package handed over as the system software is refused: $(grep -o 'installed nothing in vs0[^(]*' "$work/swapped-pup.err")"
+	else
+		fail "the font package handed over as the system software was taken (exit $r)"
+	fi
+else
+	skip "Alien Shooter: no $game and $fonts"
+fi
+
 # input and sound through states: rerecord legs on the two M4 apps
 r=$(sandboxed inputtest-rerecord inputtest.vpk 60 --rerecord --input "$script" --savedata-out "$work/inputtest-rerecord-sd")
 verdict=$(python3 "$oracle" check "$script" "$work/inputtest-rerecord-sd/data/inputtest/input.txt")

@@ -7,7 +7,11 @@ find_package(OpenGL REQUIRED COMPONENTS EGL)
 
 set(W ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(GEN ${W}/../build/generated-gl)
-set(MB "$ENV{HOME}/chimera/extern/chimera-common-minibox" CACHE PATH "miniBox checkout")
+if(DEFINED ENV{MINIBOX_DIR})
+	set(MB "$ENV{MINIBOX_DIR}" CACHE PATH "miniBox checkout")
+else()
+	set(MB "$ENV{HOME}/chimera/extern/chimera-common-minibox" CACHE PATH "miniBox checkout")
+endif()
 
 # The bridge's host half and its own glad (glad 2) as ONE object whose only
 # global symbols are chimera_gl_host_*: Vita3K's renderer has glad 1, and the

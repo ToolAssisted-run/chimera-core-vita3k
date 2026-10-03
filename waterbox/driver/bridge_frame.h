@@ -24,6 +24,9 @@ public:
     void (*bind_current)() = nullptr;
     void (*release_current)() = nullptr;
 
+    // false: a present is not read back and the picture stands (turbo)
+    bool readback = true;
+
     renderer::DisplayHandle handle() const override { return {}; }
     int drawable_width() const override { return width; }
     int drawable_height() const override { return height; }

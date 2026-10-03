@@ -1,0 +1,17 @@
+diff --git a/vita3k/util/src/logging.cpp b/vita3k/util/src/logging.cpp
+--- a/vita3k/util/src/logging.cpp
++++ b/vita3k/util/src/logging.cpp
+@@ -40,7 +40,13 @@
+ namespace logging {
+ 
+ static const fs::path &LOG_FILE_NAME = "vita3k.log";
++#ifdef CHIMERA
++// no time: the log lives in the machine's filesystem, and the host's clock
++// must not reach it
++static const char *LOG_PATTERN = "%^|%L| [%!]: %v%$";
++#else
+ static const char *LOG_PATTERN = "%^[%H:%M:%S.%e] |%L| [%!]: %v%$";
++#endif
+ static constexpr size_t ASYNC_LOG_QUEUE_SIZE = 65536;
+ static std::vector<spdlog::sink_ptr> sinks;
+ static std::once_flag s_async_logging_once;
