@@ -24,12 +24,21 @@ engine="$chimera_root/build/meson-linux/chimera-run"
 pkg="$root/build/package/vita3k.chimeraCore"
 content="${VITA3K_CONTENT:-$root/build/content}"
 
+# <what> <log> <command...>: a build step; on failure its log's end is said
+step() {
+	what="$1"; log="$2"; shift 2
+	mkdir -p "$root/build"
+	"$@" >"$log" 2>&1 && return 0
+	echo "FAIL $what (${log#$root/})"
+	tail -40 "$log" | sed 's/^/  | /'
+	exit 1
+}
 if [ "${1:-}" != "-n" ]; then
-	sh "$here/build-testapps.sh" >/dev/null || { echo "FAIL the test apps did not build"; exit 1; }
-	sh "$here/build-native.sh" >"$root/build/native-build.log" 2>&1 || { echo "FAIL the native reference did not build (build/native-build.log)"; exit 1; }
-	sh "$here/build-guest.sh" >"$root/build/guest-build.log" 2>&1 || { echo "FAIL the guest did not build (build/guest-build.log)"; exit 1; }
-	sh "$here/build-core.sh" >"$root/build/core-link.log" 2>&1 || { echo "FAIL core.wbx did not link (build/core-link.log)"; exit 1; }
-	sh "$here/build-package.sh" -n -r "$chimera_root" >"$root/build/package.log" 2>&1 || { echo "FAIL the package did not build (build/package.log)"; exit 1; }
+	step "the test apps did not build" "$root/build/testapps-build.log" sh "$here/build-testapps.sh"
+	step "the native reference did not build" "$root/build/native-build.log" sh "$here/build-native.sh"
+	step "the guest did not build" "$root/build/guest-build.log" sh "$here/build-guest.sh"
+	step "core.wbx did not link" "$root/build/core-link.log" sh "$here/build-core.sh"
+	step "the package did not build" "$root/build/package.log" sh "$here/build-package.sh" -n -r "$chimera_root"
 	echo "PASS the package builds: $(grep -o 'package sha1 [0-9a-f]*' "$root/build/package.log")"
 fi
 mkdir -p "$work"

@@ -136,12 +136,15 @@ jobs:
           path: chimera-checkout/build/Cores/vita3k.chimeraCore
           if-no-files-found: error
 
-      - name: Upload the gate work dir on failure
+      - name: Upload the gate work dir and build logs on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: gate-work
-          path: build/gate/
+          path: |
+            build/gate/
+            build/*.log
+            build/deps/*/configure.log
 
   publish:
     # What the gate passed, published as this core's own release: a rolling
