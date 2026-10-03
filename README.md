@@ -10,5 +10,8 @@ builds) and `docs/PLAN.md` (the design and the reasoning behind it).
 
 - `waterbox/build-native.sh` builds the native reference,
   `build/native/bin/vita3k-run-native`.
-- `waterbox/build-testapps.sh` builds the test apps (vitasdk's CC0 samples)
-  into `build/testapps/`.
+- `waterbox/build-testapps.sh` builds the test apps (vitasdk's CC0 samples
+  and our own, `tests/apps`) into `build/testapps/`.
+- `waterbox/run-gate.sh` runs every test app twice and compares them frame
+  by frame: the machine keeps its own clock, so a run never depends on the
+  host.

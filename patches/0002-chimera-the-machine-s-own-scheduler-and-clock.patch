@@ -1,0 +1,2394 @@
+diff --git a/vita3k/CMakeLists.txt b/vita3k/CMakeLists.txt
+--- a/vita3k/CMakeLists.txt
++++ b/vita3k/CMakeLists.txt
+@@ -107,6 +107,15 @@
+ 	include(${CMAKE_SOURCE_DIR}/cmake/qt6.cmake)
+ endif()
+ 
++# The machine's scheduler and clock. CHIMERA changes the layout of shared
++# structures (their condition variables), so every translation unit here
++# must see it alike.
++if(CHIMERA_HEADLESS)
++	add_compile_definitions(CHIMERA=1)
++	include_directories(${CMAKE_CURRENT_SOURCE_DIR}/chimera/include)
++	add_subdirectory(chimera)
++endif()
++
+ add_subdirectory(app)
+ add_subdirectory(audio)
+ add_subdirectory(camera)
+@@ -153,7 +162,7 @@
+ add_subdirectory(vkutil)
+ 
+ if(CHIMERA_HEADLESS)
+-	add_subdirectory(${CHIMERA_DRIVER_DIR} chimera)
++	add_subdirectory(${CHIMERA_DRIVER_DIR} chimera-driver)
+ 	return()
+ endif()
+ 
+diff --git a/vita3k/audio/CMakeLists.txt b/vita3k/audio/CMakeLists.txt
+--- a/vita3k/audio/CMakeLists.txt
++++ b/vita3k/audio/CMakeLists.txt
+@@ -5,5 +5,9 @@
+     src/impl/sdl_audio.cpp
+     src/impl/cubeb_audio.cpp)
+ 
++if(CHIMERA_HEADLESS)
++    target_sources(audio PRIVATE src/impl/chimera_audio.cpp)
++endif()
++
+ target_include_directories(audio PUBLIC include)
+ target_link_libraries(audio PRIVATE util cubeb SDL3::SDL3)
+diff --git a/vita3k/audio/include/audio/impl/chimera_audio.h b/vita3k/audio/include/audio/impl/chimera_audio.h
+new file mode 100644
+--- /dev/null
++++ b/vita3k/audio/include/audio/impl/chimera_audio.h
+@@ -0,0 +1,51 @@
++// Vita3K emulator project
++// Copyright (C) 2026 Vita3K team
++//
++// This program is free software; you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation; either version 2 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License along
++// with this program; if not, write to the Free Software Foundation, Inc.,
++// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++
++// Chimera: sound with no host device. A port plays in machine time - each
++// keeps the moment its queued sound runs out - so a game that waits on its
++// audio waits exactly as long on every run. What it plays is kept for the
++// frontend to take a frame at a time.
++#pragma once
++
++#include "../state.h"
++
++#include <cstdint>
++#include <deque>
++
++class ChimeraAudioAdapter : public AudioAdapter {
++public:
++    explicit ChimeraAudioAdapter(AudioState &audio_state)
++        : AudioAdapter(audio_state) {}
++
++    bool init() override { return true; }
++    AudioOutPortPtr open_port(int nb_channels, int freq, int nb_sample) override;
++    void audio_output(AudioOutPort &out_port, const void *buffer) override;
++    void set_volume(AudioOutPort &out_port, float volume) override;
++    int get_rest_sample(AudioOutPort &out_port) override;
++    void wake_all_ports() override;
++};
++
++struct ChimeraAudioOutPort : public AudioOutPort {
++    int channels = 2;
++    // machine time (ns) when everything queued so far has played
++    uint64_t play_until = 0;
++    // what was played, interleaved S16 at `freq`, waiting to be taken
++    std::deque<int16_t> played;
++    float gain = 1.0f;
++    // a notify moves it, waking an output waiting out its buffer
++    uint32_t wake_seq = 0;
++};
+diff --git a/vita3k/audio/src/audio.cpp b/vita3k/audio/src/audio.cpp
+--- a/vita3k/audio/src/audio.cpp
++++ b/vita3k/audio/src/audio.cpp
+@@ -19,6 +19,9 @@
+ 
+ #include <audio/impl/cubeb_audio.h>
+ #include <audio/impl/sdl_audio.h>
++#ifdef CHIMERA
++#include <audio/impl/chimera_audio.h>
++#endif
+ 
+ #include <util/log.h>
+ 
+@@ -68,6 +71,10 @@
+     // first delete all ports then delete the backend
+     out_ports.clear();
+     adapter.reset();
++#ifdef CHIMERA
++    // sound plays in machine time, whatever the config says
++    adapter = std::make_unique<ChimeraAudioAdapter>(*this);
++#else
+     if (adapter_name == "SDL") {
+         adapter = std::make_unique<SDLAudioAdapter>(*this);
+     } else if (adapter_name == "Cubeb") {
+@@ -76,6 +83,7 @@
+         LOG_ERROR("Unknown audio adapter {}", adapter_name);
+         return;
+     }
++#endif
+     this->audio_backend = adapter_name;
+ 
+     // lock the mutex to make sure nothing happens until the initialisation is done
+@@ -100,6 +108,11 @@
+     if (out_port.stopping)
+         return;
+ 
++#ifdef CHIMERA
++    // the adapter paced the output in machine time
++    return;
++#endif
++
+     uint64_t now = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+     uint64_t diff = now - out_port.last_output;
+     uint64_t to_wait = out_port.len_microseconds - diff;
+diff --git a/vita3k/audio/src/impl/chimera_audio.cpp b/vita3k/audio/src/impl/chimera_audio.cpp
+new file mode 100644
+--- /dev/null
++++ b/vita3k/audio/src/impl/chimera_audio.cpp
+@@ -0,0 +1,79 @@
++// Vita3K emulator project
++// Copyright (C) 2026 Vita3K team
++//
++// This program is free software; you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation; either version 2 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License along
++// with this program; if not, write to the Free Software Foundation, Inc.,
++// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++
++#include <audio/impl/chimera_audio.h>
++
++#include <chimera/vsched.h>
++
++#include <algorithm>
++#include <cstring>
++
++// at most this much unread sound is kept (a frontend that never takes it
++// must not grow the machine without bound): one second at 48 kHz stereo
++static constexpr size_t MAX_KEPT_SAMPLES = 48000 * 2;
++
++AudioOutPortPtr ChimeraAudioAdapter::open_port(int nb_channels, int freq, int nb_sample) {
++    auto port = std::make_shared<ChimeraAudioOutPort>();
++    port->channels = nb_channels;
++    port->play_until = vsched_now_ns();
++    return port;
++}
++
++// The hardware double-buffers: an output returns once the buffer before it
++// has started playing, that is when no more than one buffer is queued.
++void ChimeraAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {
++    auto &port = static_cast<ChimeraAudioOutPort &>(out_port);
++    const uint64_t buffer_ns = port.len_microseconds * 1000;
++    for (;;) {
++        if (port.stopping)
++            return;
++        const uint64_t now = vsched_now_ns();
++        if (port.play_until <= now + buffer_ns)
++            break;
++        const vsched_wait_item item = { &port.wake_seq, port.wake_seq };
++        vsched_wait_until(&item, 1, port.play_until - buffer_ns);
++    }
++    const uint64_t now = vsched_now_ns();
++    port.play_until = std::max(port.play_until, now) + buffer_ns;
++
++    const size_t samples = static_cast<size_t>(port.len_bytes) / sizeof(int16_t);
++    const int16_t *in = static_cast<const int16_t *>(buffer);
++    for (size_t i = 0; i < samples; i++)
++        port.played.push_back(static_cast<int16_t>(std::clamp(static_cast<int>(in[i] * port.gain), -32768, 32767)));
++    while (port.played.size() > MAX_KEPT_SAMPLES)
++        port.played.pop_front();
++}
++
++void ChimeraAudioAdapter::set_volume(AudioOutPort &out_port, float volume) {
++    static_cast<ChimeraAudioOutPort &>(out_port).gain = volume;
++}
++
++int ChimeraAudioAdapter::get_rest_sample(AudioOutPort &out_port) {
++    auto &port = static_cast<ChimeraAudioOutPort &>(out_port);
++    const uint64_t now = vsched_now_ns();
++    if (port.play_until <= now || port.freq <= 0)
++        return 0;
++    return static_cast<int>((port.play_until - now) * static_cast<uint64_t>(port.freq) / 1000000000ull);
++}
++
++void ChimeraAudioAdapter::wake_all_ports() {
++    for (auto &[_, port_ptr] : state.out_ports) {
++        auto &port = static_cast<ChimeraAudioOutPort &>(*port_ptr);
++        port.wake_seq++;
++        vsched_notify(&port.wake_seq, 1);
++    }
++}
+diff --git a/vita3k/chimera/CMakeLists.txt b/vita3k/chimera/CMakeLists.txt
+new file mode 100644
+--- /dev/null
++++ b/vita3k/chimera/CMakeLists.txt
+@@ -0,0 +1,12 @@
++# Chimera: the machine's own scheduler and clock (vsched), and the C++ sync
++# types the emulator uses in place of the host's. Built only with
++# CHIMERA_HEADLESS; everything that links util sees CHIMERA defined.
++add_library(chimera STATIC
++	include/chimera/sync.h
++	include/chimera/vsched.h
++	src/vsched.cpp
++)
++target_include_directories(chimera PUBLIC include)
++target_compile_definitions(chimera PUBLIC CHIMERA=1)
++find_package(Threads REQUIRED)
++target_link_libraries(chimera PUBLIC Threads::Threads)
+diff --git a/vita3k/chimera/include/chimera/sync.h b/vita3k/chimera/include/chimera/sync.h
+new file mode 100644
+--- /dev/null
++++ b/vita3k/chimera/include/chimera/sync.h
+@@ -0,0 +1,217 @@
++// The machine's threads, clock and waits, shaped like the standard library's
++// so the emulator's code keeps its shape: every one of them goes through
++// vsched, so a wait parks a thread in virtual time and a notify hands the
++// machine on deterministically.
++//
++// chimera::condition_variable takes only vclock deadlines: a host-clock
++// deadline left anywhere is a compile error, not a quiet source of drift.
++// SPDX-License-Identifier: MIT
++#pragma once
++
++#include <chimera/vsched.h>
++
++#include <pthread.h>
++
++#include <chrono>
++#include <condition_variable>
++#include <cstdint>
++#include <exception>
++#include <system_error>
++#include <functional>
++#include <memory>
++#include <tuple>
++#include <utility>
++
++namespace chimera {
++
++// Virtual time since the machine started (vsched_now_ns).
++struct vclock {
++    using rep = int64_t;
++    using period = std::nano;
++    using duration = std::chrono::nanoseconds;
++    using time_point = std::chrono::time_point<vclock>;
++    static constexpr bool is_steady = true;
++    static time_point now() noexcept {
++        return time_point(duration(static_cast<rep>(vsched_now_ns())));
++    }
++};
++
++inline uint64_t to_vsched(vclock::time_point tp) {
++    if (tp == vclock::time_point::max())
++        return VSCHED_INFINITE;
++    const auto ns = tp.time_since_epoch().count();
++    return ns < 0 ? 0 : static_cast<uint64_t>(ns);
++}
++
++template <class Rep, class Period>
++inline uint64_t to_vsched(std::chrono::duration<Rep, Period> d) {
++    if (d <= d.zero())
++        return 0;
++    if (d >= std::chrono::duration_cast<std::chrono::duration<Rep, Period>>(std::chrono::nanoseconds::max()))
++        return VSCHED_INFINITE;
++    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
++}
++
++template <class Rep, class Period>
++inline void sleep_for(std::chrono::duration<Rep, Period> d) {
++    vsched_sleep(to_vsched(d));
++}
++
++inline void sleep_until(vclock::time_point tp) {
++    vsched_sleep_until(to_vsched(tp));
++}
++
++inline void yield() {
++    vsched_yield_default();
++}
++
++class condition_variable {
++public:
++    condition_variable() = default;
++    condition_variable(const condition_variable &) = delete;
++    condition_variable &operator=(const condition_variable &) = delete;
++
++    void notify_one() noexcept {
++        seq++;
++        vsched_notify(&seq, 0);
++    }
++    void notify_all() noexcept {
++        seq++;
++        vsched_notify(&seq, 1);
++    }
++
++    template <class Lock>
++    void wait(Lock &lock) {
++        park(lock, VSCHED_INFINITE);
++    }
++    template <class Lock, class Pred>
++    void wait(Lock &lock, Pred pred) {
++        while (!pred())
++            park(lock, VSCHED_INFINITE);
++    }
++
++    template <class Lock>
++    std::cv_status wait_until(Lock &lock, vclock::time_point tp) {
++        return park(lock, to_vsched(tp)) ? std::cv_status::timeout : std::cv_status::no_timeout;
++    }
++    template <class Lock, class Pred>
++    bool wait_until(Lock &lock, vclock::time_point tp, Pred pred) {
++        while (!pred())
++            if (wait_until(lock, tp) == std::cv_status::timeout)
++                return pred();
++        return true;
++    }
++
++    template <class Lock, class Rep, class Period>
++    std::cv_status wait_for(Lock &lock, std::chrono::duration<Rep, Period> d) {
++        return wait_until(lock, deadline_after(d));
++    }
++    template <class Lock, class Rep, class Period, class Pred>
++    bool wait_for(Lock &lock, std::chrono::duration<Rep, Period> d, Pred pred) {
++        return wait_until(lock, deadline_after(d), std::move(pred));
++    }
++
++private:
++    template <class Rep, class Period>
++    static vclock::time_point deadline_after(std::chrono::duration<Rep, Period> d) {
++        const uint64_t ns = to_vsched(d);
++        if (ns == VSCHED_INFINITE)
++            return vclock::time_point::max();
++        return vclock::now() + std::chrono::nanoseconds(static_cast<int64_t>(ns));
++    }
++
++    // Unlock, park on seq (a notify moves it), lock again. Only one thread
++    // runs at a time, so nothing can slip between the unlock and the park.
++    template <class Lock>
++    int park(Lock &lock, uint64_t deadline) {
++        const vsched_wait_item item = { &seq, seq };
++        lock.unlock();
++        const int timed_out = vsched_wait_until(&item, 1, deadline);
++        lock.lock();
++        return timed_out;
++    }
++
++    uint32_t seq = 0;
++};
++
++// A machine thread: scheduled by vsched from the moment it is made, joined
++// in virtual time.
++class thread {
++public:
++    thread() noexcept = default;
++
++    template <class F, class... Args>
++    explicit thread(F &&f, Args &&...args) {
++        auto st = std::make_shared<state>();
++        st->fn = [f = std::decay_t<F>(std::forward<F>(f)), tup = std::make_tuple(std::decay_t<Args>(std::forward<Args>(args))...)]() mutable {
++            std::apply([&](auto &...a) { std::invoke(f, a...); }, tup);
++        };
++        auto *arg = new std::shared_ptr<state>(st);
++        if (vsched_create(&pt, &entry, arg) != 0) {
++            delete arg;
++            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
++        }
++        s = std::move(st);
++    }
++
++    thread(thread &&o) noexcept
++        : s(std::move(o.s))
++        , pt(o.pt) {
++        o.pt = 0;
++    }
++    thread &operator=(thread &&o) noexcept {
++        if (joinable())
++            std::terminate();
++        s = std::move(o.s);
++        pt = o.pt;
++        o.pt = 0;
++        return *this;
++    }
++    thread(const thread &) = delete;
++    thread &operator=(const thread &) = delete;
++
++    ~thread() {
++        if (joinable())
++            std::terminate();
++    }
++
++    bool joinable() const noexcept {
++        return s != nullptr;
++    }
++
++    // In virtual time until the thread has left the machine, then the host
++    // thread itself, which by then has nothing left to do but end.
++    void join() {
++        while (!s->done) {
++            const vsched_wait_item item = { &s->done, 0 };
++            vsched_wait(&item, 1, VSCHED_INFINITE);
++        }
++        pthread_join(static_cast<pthread_t>(pt), nullptr);
++        s.reset();
++    }
++
++    void detach() {
++        pthread_detach(static_cast<pthread_t>(pt));
++        s.reset();
++    }
++
++private:
++    struct state {
++        std::function<void()> fn;
++        uint32_t done = 0;
++    };
++
++    static void *entry(void *p) {
++        std::shared_ptr<state> st = std::move(*static_cast<std::shared_ptr<state> *>(p));
++        delete static_cast<std::shared_ptr<state> *>(p);
++        st->fn();
++        st->done = 1;
++        vsched_notify(&st->done, 1);
++        return nullptr;
++    }
++
++    std::shared_ptr<state> s;
++    unsigned long pt = 0;
++};
++
++} // namespace chimera
+diff --git a/vita3k/chimera/include/chimera/vsched.h b/vita3k/chimera/include/chimera/vsched.h
+new file mode 100644
+--- /dev/null
++++ b/vita3k/chimera/include/chimera/vsched.h
+@@ -0,0 +1,98 @@
++// vsched: the virtual-time scheduler that owns every one of the machine's
++// threads (ported from chimera-core-rpcs3). One thread runs at a time; the
++// running thread hands off explicitly; virtual time advances by what the
++// machine charges (the CPU's instructions, yields) and jumps to the next
++// deadline when nothing is runnable. Plain pthreads + semaphores in both
++// flavours, so the native build follows exactly the schedule the sandbox
++// follows.
++// SPDX-License-Identifier: MIT
++#pragma once
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define VSCHED_INFINITE UINT64_MAX
++
++typedef void *(*vsched_entry_fn)(void *);
++
++typedef struct vsched_wait_item {
++    const void *addr;
++    uint32_t old;
++} vsched_wait_item;
++
++// The calling thread becomes thread 0 (the driver). Call once, first.
++void vsched_init(void);
++// true once vsched_init ran: before it (static initialisers) every call is a
++// no-op, as nothing could be scheduled
++int vsched_active(void);
++
++// A pthread that starts parked and runs only when scheduled; threads are
++// scheduled round robin in creation order. `out_pthread` receives the
++// pthread_t so the caller can join it once it is done.
++int vsched_create(unsigned long *out_pthread, vsched_entry_fn fn, void *arg);
++
++// The current thread leaves the machine (does not return).
++void vsched_exit(void);
++
++// Virtual time in nanoseconds since the machine started. It starts at one
++// second: the emulator treats a zero time as "not yet" in places.
++uint64_t vsched_now_ns(void);
++#define VSCHED_START_NS 1000000000ull
++
++// The machine's calendar: Unix seconds at the moment the machine started,
++// carried forward by virtual time. The host's date is never the console's.
++void vsched_set_calendar_start(uint64_t unix_seconds);
++uint64_t vsched_calendar_us(void);
++
++// Charge virtual time without giving way.
++void vsched_advance(uint64_t ns);
++
++// Charge virtual time and give way to the next runnable thread, if any.
++void vsched_yield(uint64_t cost_ns);
++// a yield at the fixed yield cost, for the emulator's spin-and-yield sites
++void vsched_yield_default(void);
++
++// Park until one of the addresses is notified, its value already differs
++// from `old`, or the timeout elapses. Returns 1 on timeout, 0 otherwise;
++// callers re-check their condition either way (futex semantics).
++int vsched_wait(const vsched_wait_item *items, int n, uint64_t timeout_ns);
++// the same with an absolute deadline in virtual time
++int vsched_wait_until(const vsched_wait_item *items, int n, uint64_t deadline_ns);
++
++// Wake the longest-waiting thread (or every thread) parked on `addr`.
++void vsched_notify(const void *addr, int all);
++
++// Park for a duration of virtual time, or until a moment of it.
++void vsched_sleep(uint64_t ns);
++void vsched_sleep_until(uint64_t deadline_ns);
++
++// The CPU: instructions become time at the machine's rate, and a thread
++// gives way after a slice of them. vsched_cpu_charge is dynarmic's AddTicks,
++// vsched_cpu_remaining its GetTicksRemaining; a JIT that ran out calls
++// vsched_cpu_slice_over.
++void vsched_set_cpu_hz(uint64_t hz);
++uint64_t vsched_cpu_hz(void);
++void vsched_cpu_charge(uint64_t instructions);
++uint64_t vsched_cpu_remaining(void);
++void vsched_cpu_slice_over(void);
++
++// Thread-local storage without ELF TLS: every thread owns a slot in
++// [0, VSCHED_SLOTS) for its whole life (slots are reused after exit).
++// Resetters registered here run for a slot whenever a thread is born into it
++// (and once for slot 0 at registration).
++#define VSCHED_SLOTS 256
++int vsched_slot(void);
++void vsched_register_slot_reset(void (*fn)(int slot));
++void vsched_register_thread_exit(void (*fn)(int slot));
++
++// Diagnostics.
++int vsched_thread_count(void);
++uint32_t vsched_current_id(void);
++uint64_t vsched_switch_count(void);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/vita3k/chimera/src/vsched.cpp b/vita3k/chimera/src/vsched.cpp
+new file mode 100644
+--- /dev/null
++++ b/vita3k/chimera/src/vsched.cpp
+@@ -0,0 +1,415 @@
++// vsched: see vsched.h. The machine's own scheduler, host-agnostic.
++// SPDX-License-Identifier: MIT
++#include <chimera/vsched.h>
++
++#include <pthread.h>
++#include <semaphore.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <xmmintrin.h>
++
++// The costs that make virtual time out of work. These constants are the
++// machine; movies cite the core version, and the core version pins them.
++//
++// The CPU: three cores' worth of a 444 MHz Cortex-A9 at one instruction a
++// cycle, as one timeline. Every guest thread runs on it in turn, so a game
++// that keeps three cores busy gets the throughput it had; one that keeps one
++// busy idles more, which a vsync-locked game never shows.
++static const uint64_t DEFAULT_CPU_HZ = 1332000000ull;
++static const uint64_t CPU_SLICE = 100000;  // instructions before a thread gives way
++static const uint64_t YIELD_COST_NS = 1000;
++static const size_t THREAD_STACK_BYTES = 8u << 20;
++
++enum state_t {
++    RUNNABLE,
++    WAITING,
++    DEAD,
++};
++
++struct vthread {
++    sem_t sem;
++    pthread_t pt;
++    uint32_t id;
++    state_t state;
++    uint64_t deadline; // VSCHED_INFINITE when not timed
++    uint64_t wait_seq; // FIFO order among waiters
++    const vsched_wait_item *items;
++    int nitems;
++    int timed_out;
++    uint32_t mxcsr;
++    uint16_t fcw;
++    vsched_entry_fn fn;
++    void *arg;
++    int slot;
++    vthread *next; // creation-order ring
++};
++
++static vthread *g_head; // first created (the driver)
++static vthread *g_tail;
++static vthread *g_cur;
++static uint64_t g_now;
++static uint32_t g_next_id;
++static uint64_t g_wait_seq;
++static uint64_t g_switches;
++static int g_count;
++
++// 2013-01-01 00:00:00 UTC until the driver says otherwise
++static uint64_t g_calendar_start = 1356998400ull;
++
++static uint64_t g_cpu_hz = DEFAULT_CPU_HZ;
++static uint64_t g_cpu_frac; // nanoseconds * hz not yet charged
++static uint64_t g_slice_left = CPU_SLICE;
++
++[[noreturn]] static void die(const char *what) {
++    fprintf(stderr, "vsched: %s (now=%llu ns, threads=%d)\n", what, (unsigned long long)g_now, g_count);
++    for (vthread *t = g_head; t; t = t->next)
++        fprintf(stderr, "  thread %u: %s deadline=%llu items=%d\n", t->id,
++            t->state == RUNNABLE ? "runnable" : t->state == WAITING ? "waiting"
++                                                                     : "dead",
++            (unsigned long long)t->deadline, t->nitems);
++    fflush(stderr);
++    abort();
++}
++
++static bool g_slot_used[VSCHED_SLOTS];
++static void (*g_slot_resets[1024])(int);
++static int g_slot_reset_count;
++static void (*g_thread_exits[64])(int);
++static int g_thread_exit_count;
++
++static int take_slot(void) {
++    for (int i = 0; i < VSCHED_SLOTS; i++)
++        if (!g_slot_used[i]) {
++            g_slot_used[i] = true;
++            for (int r = 0; r < g_slot_reset_count; r++)
++                g_slot_resets[r](i);
++            return i;
++        }
++    die("out of thread slots");
++}
++
++static void fpu_save(vthread *t) {
++    t->mxcsr = _mm_getcsr();
++    __asm__ volatile("fnstcw %0" : "=m"(t->fcw));
++}
++
++static void fpu_restore(const vthread *t) {
++    _mm_setcsr(t->mxcsr);
++    __asm__ volatile("fldcw %0" : : "m"(t->fcw));
++}
++
++// Wake every timed waiter whose deadline has passed.
++static void wake_expired(void) {
++    for (vthread *t = g_head; t; t = t->next)
++        if (t->state == WAITING && t->deadline <= g_now) {
++            t->state = RUNNABLE;
++            t->timed_out = 1;
++        }
++}
++
++// The next runnable thread after `from` in ring order, or null.
++static vthread *next_runnable_after(vthread *from) {
++    vthread *t = from->next ? from->next : g_head;
++    for (int i = 0; i < g_count; i++) {
++        if (t->state == RUNNABLE)
++            return t;
++        t = t->next ? t->next : g_head;
++    }
++    return nullptr;
++}
++
++// When nothing is runnable, time jumps to the earliest deadline.
++static void advance_to_next_deadline(void) {
++    uint64_t best = VSCHED_INFINITE;
++    for (vthread *t = g_head; t; t = t->next)
++        if (t->state == WAITING && t->deadline < best)
++            best = t->deadline;
++    if (best == VSCHED_INFINITE)
++        die("every thread is waiting forever");
++    if (best > g_now)
++        g_now = best;
++    wake_expired();
++}
++
++// Hand the machine to `t` and park until scheduled again.
++static void switch_to(vthread *t) {
++    vthread *self = g_cur;
++    if (t == self)
++        return;
++    fpu_save(self);
++    g_cur = t;
++    g_switches++;
++    g_slice_left = CPU_SLICE;
++    sem_post(&t->sem);
++    while (sem_wait(&self->sem) != 0) {
++    }
++    if (g_cur != self)
++        die("the baton was duplicated: a thread resumed without being scheduled");
++    fpu_restore(self);
++}
++
++// The current thread is no longer runnable: find who runs next.
++static void schedule_away(void) {
++    vthread *self = g_cur;
++    for (;;) {
++        wake_expired();
++        vthread *t = next_runnable_after(self);
++        if (t) {
++            switch_to(t);
++            return;
++        }
++        if (self->state == RUNNABLE)
++            return; // only we can run: keep running
++        advance_to_next_deadline();
++    }
++}
++
++static void *trampoline(void *p) {
++    vthread *t = (vthread *)p;
++    while (sem_wait(&t->sem) != 0) {
++    }
++    if (g_cur != t)
++        die("the baton was duplicated: a new thread started without being scheduled");
++    fpu_restore(t);
++    t->fn(t->arg);
++    vsched_exit();
++    return nullptr;
++}
++
++void vsched_init(void) {
++    vthread *t = (vthread *)calloc(1, sizeof(vthread));
++    sem_init(&t->sem, 0, 0);
++    t->pt = pthread_self();
++    t->id = g_next_id++;
++    t->state = RUNNABLE;
++    t->deadline = VSCHED_INFINITE;
++    t->slot = take_slot(); // slot 0: its resetters already ran at registration
++    fpu_save(t);
++    g_head = g_tail = g_cur = t;
++    g_count = 1;
++    g_now = VSCHED_START_NS;
++}
++
++int vsched_active(void) {
++    return g_cur != nullptr;
++}
++
++int vsched_create(unsigned long *out_pthread, vsched_entry_fn fn, void *arg) {
++    if (!g_cur)
++        die("a thread was made before the machine (vsched_init)");
++    vthread *t = (vthread *)calloc(1, sizeof(vthread));
++    sem_init(&t->sem, 0, 0);
++    t->id = g_next_id++;
++    t->state = RUNNABLE;
++    t->deadline = VSCHED_INFINITE;
++    t->fn = fn;
++    t->arg = arg;
++    t->slot = take_slot();
++    // a new thread starts with the machine's default FPU state, not the
++    // creator's
++    t->mxcsr = 0x1f80;
++    t->fcw = 0x37f;
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    pthread_attr_setstacksize(&attr, THREAD_STACK_BYTES);
++    int rc = pthread_create(&t->pt, &attr, trampoline, t);
++    pthread_attr_destroy(&attr);
++    if (rc != 0) {
++        g_slot_used[t->slot] = false;
++        sem_destroy(&t->sem);
++        free(t);
++        return rc;
++    }
++    g_tail->next = t;
++    g_tail = t;
++    g_count++;
++    if (out_pthread)
++        memcpy(out_pthread, &t->pt, sizeof(pthread_t));
++    return 0;
++}
++
++void vsched_exit(void) {
++    vthread *self = g_cur;
++    if (self == g_head)
++        die("the driver thread tried to exit");
++    for (int i = 0; i < g_thread_exit_count; i++)
++        g_thread_exits[i](self->slot);
++    self->state = DEAD;
++    g_slot_used[self->slot] = false;
++    // unlink
++    vthread *prev = g_head;
++    while (prev->next != self)
++        prev = prev->next;
++    prev->next = self->next;
++    if (g_tail == self)
++        g_tail = prev;
++    g_count--;
++    // choose the successor the way schedule_away would, starting after prev
++    vthread *t = nullptr;
++    for (;;) {
++        wake_expired();
++        t = next_runnable_after(prev);
++        if (t)
++            break;
++        advance_to_next_deadline();
++    }
++    g_cur = t;
++    g_switches++;
++    g_slice_left = CPU_SLICE;
++    sem_post(&t->sem);
++    // the thread struct outlives us until nobody can name it; leak it
++    // deliberately (a few hundred bytes per thread ever created)
++    pthread_exit(nullptr);
++}
++
++uint64_t vsched_now_ns(void) {
++    return g_now;
++}
++
++void vsched_set_calendar_start(uint64_t unix_seconds) {
++    g_calendar_start = unix_seconds;
++}
++
++uint64_t vsched_calendar_us(void) {
++    const uint64_t since = (g_cur ? g_now : VSCHED_START_NS) - VSCHED_START_NS;
++    return g_calendar_start * 1000000ull + since / 1000ull;
++}
++
++void vsched_advance(uint64_t ns) {
++    g_now += ns;
++}
++
++void vsched_yield(uint64_t cost_ns) {
++    if (!g_cur)
++        return; // before the machine exists (static initialisers), a yield is nothing
++    g_now += cost_ns;
++    wake_expired();
++    vthread *t = next_runnable_after(g_cur);
++    if (t)
++        switch_to(t);
++    else
++        g_slice_left = CPU_SLICE;
++}
++
++void vsched_yield_default(void) {
++    vsched_yield(YIELD_COST_NS);
++}
++
++int vsched_wait_until(const vsched_wait_item *items, int n, uint64_t deadline_ns) {
++    if (!g_cur)
++        return 0; // static initialisers may not park: nobody could wake them
++    for (int i = 0; i < n; i++)
++        if (*(const volatile uint32_t *)items[i].addr != items[i].old)
++            return 0;
++    if (deadline_ns <= g_now)
++        return 1;
++    vthread *self = g_cur;
++    self->items = items;
++    self->nitems = n;
++    self->timed_out = 0;
++    self->wait_seq = ++g_wait_seq;
++    self->deadline = deadline_ns;
++    self->state = WAITING;
++    schedule_away();
++    self->state = RUNNABLE;
++    self->items = nullptr;
++    self->nitems = 0;
++    self->deadline = VSCHED_INFINITE;
++    return self->timed_out;
++}
++
++int vsched_wait(const vsched_wait_item *items, int n, uint64_t timeout_ns) {
++    const uint64_t deadline = timeout_ns == VSCHED_INFINITE || timeout_ns > VSCHED_INFINITE - g_now
++        ? VSCHED_INFINITE
++        : g_now + timeout_ns;
++    return vsched_wait_until(items, n, deadline);
++}
++
++void vsched_notify(const void *addr, int all) {
++    for (;;) {
++        vthread *best = nullptr;
++        for (vthread *t = g_head; t; t = t->next) {
++            if (t->state != WAITING)
++                continue;
++            for (int i = 0; i < t->nitems; i++)
++                if (t->items[i].addr == addr) {
++                    if (!best || t->wait_seq < best->wait_seq)
++                        best = t;
++                    break;
++                }
++        }
++        if (!best)
++            return;
++        best->state = RUNNABLE;
++        best->timed_out = 0;
++        if (!all)
++            return;
++    }
++}
++
++void vsched_sleep(uint64_t ns) {
++    static uint32_t nobody;
++    vsched_wait_item it = { &nobody, 0 };
++    vsched_wait(&it, 1, ns);
++}
++
++void vsched_sleep_until(uint64_t deadline_ns) {
++    static uint32_t nobody;
++    vsched_wait_item it = { &nobody, 0 };
++    vsched_wait_until(&it, 1, deadline_ns);
++}
++
++void vsched_set_cpu_hz(uint64_t hz) {
++    g_cpu_hz = hz ? hz : DEFAULT_CPU_HZ;
++}
++
++uint64_t vsched_cpu_hz(void) {
++    return g_cpu_hz;
++}
++
++// Exact: the fraction of a nanosecond carries over, so a run's time does not
++// depend on how the instructions were batched.
++void vsched_cpu_charge(uint64_t instructions) {
++    g_cpu_frac += instructions * 1000000000ull;
++    g_now += g_cpu_frac / g_cpu_hz;
++    g_cpu_frac %= g_cpu_hz;
++    g_slice_left = instructions >= g_slice_left ? 0 : g_slice_left - instructions;
++}
++
++uint64_t vsched_cpu_remaining(void) {
++    return g_slice_left;
++}
++
++void vsched_cpu_slice_over(void) {
++    vsched_yield(0);
++}
++
++int vsched_slot(void) {
++    return g_cur ? g_cur->slot : 0;
++}
++
++void vsched_register_slot_reset(void (*fn)(int)) {
++    if (g_slot_reset_count >= 1024)
++        die("too many thread-local resetters");
++    g_slot_resets[g_slot_reset_count++] = fn;
++    fn(0);
++}
++
++void vsched_register_thread_exit(void (*fn)(int)) {
++    if (g_thread_exit_count >= 64)
++        die("too many thread-exit hooks");
++    g_thread_exits[g_thread_exit_count++] = fn;
++}
++
++int vsched_thread_count(void) {
++    return g_count;
++}
++
++uint32_t vsched_current_id(void) {
++    return g_cur ? g_cur->id : 0;
++}
++
++uint64_t vsched_switch_count(void) {
++    return g_switches;
++}
+diff --git a/vita3k/cpu/src/dynarmic_cpu.cpp b/vita3k/cpu/src/dynarmic_cpu.cpp
+--- a/vita3k/cpu/src/dynarmic_cpu.cpp
++++ b/vita3k/cpu/src/dynarmic_cpu.cpp
+@@ -17,6 +17,10 @@
+ 
+ #include "cpu/common.h"
+ #include <cpu/impl/dynarmic_cpu.h>
++
++#ifdef CHIMERA
++#include <chimera/vsched.h>
++#endif
+ #include <cpu/state.h>
+ #include <util/log.h>
+ 
+@@ -323,10 +327,20 @@
+         cpu->jit->HaltExecution(Dynarmic::HaltReason::UserDefined8);
+     }
+ 
+-    void AddTicks(uint64_t ticks) override {}
++    // Chimera: the instructions the JIT ran are the machine's time, and a
++    // slice of them is a thread's turn (vsched)
++    void AddTicks(uint64_t ticks) override {
++#ifdef CHIMERA
++        vsched_cpu_charge(ticks);
++#endif
++    }
+ 
+     uint64_t GetTicksRemaining() override {
++#ifdef CHIMERA
++        return vsched_cpu_remaining();
++#else
+         return 1ull << 60;
++#endif
+     }
+ };
+ 
+@@ -347,7 +361,11 @@
+     config.coprocessors[15] = cp15;
+     config.processor_id = core_id;
+     config.optimizations = cpu_opt ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
++#ifdef CHIMERA
++    config.enable_cycle_counting = true;
++#else
+     config.enable_cycle_counting = false;
++#endif
+ 
+     return std::make_unique<Dynarmic::A32::Jit>(config);
+ }
+@@ -368,9 +386,19 @@
+     break_ = false;
+     parent->svc_called = false;
+     Dynarmic::HaltReason halt_reason;
+-    do {
++    for (;;) {
+         halt_reason = jit->Run();
+-    } while ((halt_reason == Dynarmic::HaltReason::Step) || (halt_reason == Dynarmic::HaltReason::CacheInvalidation));
++        if ((halt_reason == Dynarmic::HaltReason::Step) || (halt_reason == Dynarmic::HaltReason::CacheInvalidation))
++            continue;
++#ifdef CHIMERA
++        // the slice ran out: give way, then carry on where the JIT stopped
++        if (!halt_reason && vsched_cpu_remaining() == 0) {
++            vsched_cpu_slice_over();
++            continue;
++        }
++#endif
++        break;
++    }
+ 
+     return halted;
+ }
+diff --git a/vita3k/ctrl/src/ctrl.cpp b/vita3k/ctrl/src/ctrl.cpp
+--- a/vita3k/ctrl/src/ctrl.cpp
++++ b/vita3k/ctrl/src/ctrl.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <ctrl/ctrl.h>
++#include <util/machine.h>
+ #include <ctrl/functions.h>
+ #include <ctrl/state.h>
+ 
+@@ -307,7 +308,7 @@
+         state.last_vcount[port] = vblank_count;
+     }
+ 
+-    std::chrono::time_point<std::chrono::steady_clock> ts = std::chrono::steady_clock::now();
++    machine::clock::time_point ts = machine::clock::now();
+     uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(ts.time_since_epoch()).count();
+     pData->timeStamp = timestamp;
+     retrieve_ctrl_data(emuenv, port, is_v2, negative, from_ext, pData->buttons, pData->lx, pData->ly, pData->rx, pData->ry);
+diff --git a/vita3k/display/include/display/state.h b/vita3k/display/include/display/state.h
+--- a/vita3k/display/include/display/state.h
++++ b/vita3k/display/include/display/state.h
+@@ -20,6 +20,7 @@
+ #include <kernel/callback.h>
+ #include <kernel/thread/wait_queue.h>
+ #include <mem/ptr.h>
++#include <util/machine.h>
+ #include <util/types.h>
+ 
+ #include <atomic>
+@@ -64,7 +65,7 @@
+     DisplayFrameInfo next_rendered_frame;
+ 
+     std::mutex mutex;
+-    std::unique_ptr<std::thread> vblank_thread;
++    std::unique_ptr<machine::thread> vblank_thread;
+     std::atomic<bool> abort{ false };
+     std::atomic<bool> imgui_render{ true };
+     std::atomic<bool> fullscreen{ false };
+diff --git a/vita3k/display/src/display.cpp b/vita3k/display/src/display.cpp
+--- a/vita3k/display/src/display.cpp
++++ b/vita3k/display/src/display.cpp
+@@ -39,6 +39,14 @@
+     DisplayState &display = emuenv.display;
+ 
+     while (!display.abort.load()) {
++#ifdef CHIMERA
++        // the machine's vblank: vblank k comes at exactly k/60 s of machine
++        // time, whenever the thread started
++        machine::sleep_until(machine::clock::time_point(std::chrono::nanoseconds(
++            VSCHED_START_NS + (display.vblank_count.load() + 1) * 1000000000ull / TARGET_FPS)));
++        if (display.abort.load())
++            break;
++#endif
+         {
+             const std::lock_guard<std::mutex> guard(display.mutex);
+ 
+@@ -67,14 +75,16 @@
+                 return waiter.entry.target_vcount <= display.vblank_count;
+             });
+         }
++#ifndef CHIMERA
+         const auto time_ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+         const auto time_left = TARGET_MICRO_PER_FRAME - (time_ms % TARGET_MICRO_PER_FRAME);
+         std::this_thread::sleep_for(std::chrono::microseconds(time_left));
++#endif
+     }
+ }
+ 
+ void start_sync_thread(EmuEnvState &emuenv) {
+-    emuenv.display.vblank_thread = std::make_unique<std::thread>(vblank_sync_thread, std::ref(emuenv));
++    emuenv.display.vblank_thread = std::make_unique<machine::thread>(vblank_sync_thread, std::ref(emuenv));
+ }
+ 
+ void wait_vblank(DisplayState &display, KernelState &kernel, const ThreadStatePtr &wait_thread, const uint64_t target_vcount, const bool is_cb) {
+diff --git a/vita3k/gxm/include/gxm/state.h b/vita3k/gxm/include/gxm/state.h
+--- a/vita3k/gxm/include/gxm/state.h
++++ b/vita3k/gxm/include/gxm/state.h
+@@ -59,7 +59,7 @@
+ 
+     Queue<DisplayCallback> display_queue;
+     SceUID display_queue_thread;
+-    std::thread display_host_thread;
++    machine::thread display_host_thread;
+ 
+     // global timestamp used by sync objects
+     std::atomic<uint32_t> global_timestamp{ 1 };
+diff --git a/vita3k/kernel/include/kernel/state.h b/vita3k/kernel/include/kernel/state.h
+--- a/vita3k/kernel/include/kernel/state.h
++++ b/vita3k/kernel/include/kernel/state.h
+@@ -35,6 +35,7 @@
+ 
+ #include <atomic>
+ #include <condition_variable>
++#include <util/machine.h>
+ #include <functional>
+ #include <map>
+ #include <mutex>
+@@ -171,7 +172,7 @@
+     // kubridge exception handlers (DABT=0, PABT=1, UNDEF=2)
+     static constexpr int EXCEPTION_HANDLER_MAX = 3;
+     std::atomic<Address> exception_handlers[EXCEPTION_HANDLER_MAX]{};
+-    std::condition_variable thread_deleted_cond;
++    machine::condition_variable thread_deleted_cond;
+ 
+     SceUID get_next_uid() {
+         return next_uid++;
+diff --git a/vita3k/kernel/include/kernel/thread/thread_state.h b/vita3k/kernel/include/kernel/thread/thread_state.h
+--- a/vita3k/kernel/include/kernel/thread/thread_state.h
++++ b/vita3k/kernel/include/kernel/thread/thread_state.h
+@@ -26,6 +26,7 @@
+ 
+ #include <concepts>
+ #include <condition_variable>
++#include <util/machine.h>
+ #include <mutex>
+ #include <optional>
+ #include <string>
+@@ -68,7 +69,7 @@
+     ThreadStatus status = ThreadStatus::dormant;
+ 
+     std::vector<CallbackPtr> callbacks;
+-    std::condition_variable status_cond;
++    machine::condition_variable status_cond;
+     uint32_t returned_value = 0;
+ 
+     ThreadState() = delete;
+@@ -147,7 +148,7 @@
+     bool wake_pending = false;
+ 
+     // Notified under mutex whenever a condition a wait may be blocked on changes.
+-    std::condition_variable wait_cv;
++    machine::condition_variable wait_cv;
+ 
+     struct EndWaitEntry {
+         // Where to write the exit status, or null
+diff --git a/vita3k/kernel/include/kernel/thread/wait.h b/vita3k/kernel/include/kernel/thread/wait.h
+--- a/vita3k/kernel/include/kernel/thread/wait.h
++++ b/vita3k/kernel/include/kernel/thread/wait.h
+@@ -18,6 +18,7 @@
+ #pragma once
+ 
+ #include <kernel/types.h>
++#include <util/machine.h>
+ 
+ #include <chrono>
+ 
+@@ -47,20 +48,20 @@
+     bool exiting = false;
+ };
+ 
+-using Deadline = std::chrono::steady_clock::time_point;
++using Deadline = machine::clock::time_point;
+ 
+ // Converts a guest timeout in microseconds into a deadline. A null timeout waits forever.
+ inline Deadline deadline_from(const SceUInt32 *timeout) {
+     if (!timeout)
+         return Deadline::max();
+-    return std::chrono::steady_clock::now() + std::chrono::microseconds(*timeout);
++    return machine::clock::now() + std::chrono::microseconds(*timeout);
+ }
+ 
+ // Writes the time left before the deadline back to a guest timeout.
+ inline void writeback_timeout(SceUInt32 *timeout, Deadline deadline) {
+     if (!timeout || deadline == Deadline::max())
+         return;
+-    const auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now()).count();
++    const auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - machine::clock::now()).count();
+     *timeout = left > 0 ? static_cast<SceUInt32>(left) : 0;
+ }
+ 
+diff --git a/vita3k/kernel/src/kernel.cpp b/vita3k/kernel/src/kernel.cpp
+--- a/vita3k/kernel/src/kernel.cpp
++++ b/vita3k/kernel/src/kernel.cpp
+@@ -21,6 +21,10 @@
+ 
+ #include <cpu/common.h>
+ #include <kernel/state.h>
++
++#ifdef CHIMERA
++#include <chimera/sync.h>
++#endif
+ #include <mem/functions.h>
+ 
+ #include <kernel/thread/thread_state.h>
+@@ -57,10 +61,16 @@
+     SDL_Semaphore *host_may_destroy_params = nullptr;
+ };
+ 
++static int run_thread(const ThreadParams params);
++
+ static int SDLCALL thread_function(void *data) {
+     assert(data != nullptr);
+     const ThreadParams params = *static_cast<const ThreadParams *>(data);
+     SDL_SignalSemaphore(params.host_may_destroy_params);
++    return run_thread(params);
++}
++
++static int run_thread(const ThreadParams params) {
+     ThreadStatePtr thread = params.kernel->get_thread(params.thid);
+ #ifdef TRACY_ENABLE
+     if (!thread->name.empty()) {
+@@ -164,10 +174,16 @@
+     params.kernel = this;
+     params.thid = thread->id;
+ 
++#ifdef CHIMERA
++    // a machine thread: scheduled from the moment it is made, and holding
++    // its own copy of the parameters, so there is nothing to hand over
++    chimera::thread([params] { run_thread(params); }).detach();
++#else
+     params.host_may_destroy_params = SDL_CreateSemaphore(0);
+     SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name.c_str(), &params));
+     SDL_WaitSemaphore(params.host_may_destroy_params);
+     SDL_DestroySemaphore(params.host_may_destroy_params);
++#endif
+ 
+     return thread;
+ }
+diff --git a/vita3k/kernel/src/sync_primitives.cpp b/vita3k/kernel/src/sync_primitives.cpp
+--- a/vita3k/kernel/src/sync_primitives.cpp
++++ b/vita3k/kernel/src/sync_primitives.cpp
+@@ -252,9 +252,7 @@
+ // *********
+ 
+ inline uint64_t get_current_time() {
+-    return std::chrono::duration_cast<std::chrono::microseconds>(
+-        std::chrono::high_resolution_clock::now().time_since_epoch())
+-        .count();
++    return machine::now_us();
+ }
+ 
+ SceUID timer_create(KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt32 attr) {
+@@ -398,7 +396,7 @@
+             Deadline deadline = Deadline::max();
+             if (is_first && timer->next_event != std::numeric_limits<uint64_t>::max()) {
+                 const uint64_t wait_time = timer->next_event > current_time ? timer->next_event - current_time : 0;
+-                deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(wait_time);
++                deadline = machine::clock::now() + std::chrono::microseconds(wait_time);
+             }
+ 
+             lock.unlock();
+diff --git a/vita3k/modules/SceAppUtil/SceAppUtil.cpp b/vita3k/modules/SceAppUtil/SceAppUtil.cpp
+--- a/vita3k/modules/SceAppUtil/SceAppUtil.cpp
++++ b/vita3k/modules/SceAppUtil/SceAppUtil.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include "SceAppUtil.h"
++#include <util/machine.h>
+ 
+ #include <emuenv/app_util.h>
+ 
+@@ -309,7 +310,7 @@
+         SceAppUtilSaveDataSlotParam param{};
+         auto *slot_param = slot->slotParam ? slot->slotParam.get(emuenv.mem) : &param;
+         SceDateTime modified_time;
+-        std::time_t time = std::time(0);
++        std::time_t time = machine::calendar_time();
+         tm local = {};
+ 
+         if (!slot->slotParam) {
+diff --git a/vita3k/modules/SceAvPlayer/SceAvPlayer.cpp b/vita3k/modules/SceAvPlayer/SceAvPlayer.cpp
+--- a/vita3k/modules/SceAvPlayer/SceAvPlayer.cpp
++++ b/vita3k/modules/SceAvPlayer/SceAvPlayer.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <module/module.h>
++#include <util/machine.h>
+ 
+ #include <codec/state.h>
+ #include <io/functions.h>
+@@ -198,7 +199,7 @@
+ 
+ static inline uint64_t current_time() {
+     return std::chrono::duration_cast<std::chrono::microseconds>(
+-        std::chrono::high_resolution_clock::now().time_since_epoch())
++        machine::clock::now().time_since_epoch())
+         .count();
+ }
+ 
+diff --git a/vita3k/modules/SceDisplay/SceDisplay.cpp b/vita3k/modules/SceDisplay/SceDisplay.cpp
+--- a/vita3k/modules/SceDisplay/SceDisplay.cpp
++++ b/vita3k/modules/SceDisplay/SceDisplay.cpp
+@@ -120,8 +120,15 @@
+ 
+ EXPORT(SceInt32, _sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, SceDisplaySetBufSync sync, uint32_t *pFrameBuf_size) {
+     TRACY_FUNC(_sceDisplaySetFrameBuf, pFrameBuf, sync, pFrameBuf_size);
+-    if (!pFrameBuf)
++    if (!pFrameBuf) {
++        // No frame buffer: the display shows nothing, as the hardware's does,
++        // and nothing reads the memory that held the last one - an app frees
++        // it next (vitasdk's debug screen does, at exit).
++        std::lock_guard<std::mutex> lock(emuenv.display.display_info_mutex);
++        emuenv.display.sce_frame = {};
++        emuenv.display.next_rendered_frame = {};
+         return SCE_DISPLAY_ERROR_OK;
++    }
+     if (pFrameBuf->size != sizeof(SceDisplayFrameBuf) && pFrameBuf->size != sizeof(SceDisplayFrameBuf2)) {
+         return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_VALUE);
+     }
+diff --git a/vita3k/modules/SceDriverUser/SceMotion.cpp b/vita3k/modules/SceDriverUser/SceMotion.cpp
+--- a/vita3k/modules/SceDriverUser/SceMotion.cpp
++++ b/vita3k/modules/SceDriverUser/SceMotion.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <module/module.h>
++#include <util/machine.h>
+ 
+ #include <ctrl/state.h>
+ #include <motion/functions.h>
+@@ -96,7 +97,7 @@
+         memset(sensorState, 0, sizeof(*sensorState));
+         sensorState->accelerometer.z = -1.0;
+ 
+-        std::chrono::time_point<std::chrono::steady_clock> ts = std::chrono::steady_clock::now();
++        machine::clock::time_point ts = machine::clock::now();
+         uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(ts.time_since_epoch()).count();
+         sensorState->timestamp = timestamp;
+         sensorState->hostTimestamp = timestamp;
+@@ -144,7 +145,7 @@
+         // put some default values
+         memset(motionState, 0, sizeof(SceMotionState));
+ 
+-        std::chrono::time_point<std::chrono::steady_clock> ts = std::chrono::steady_clock::now();
++        machine::clock::time_point ts = machine::clock::now();
+         uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(ts.time_since_epoch()).count();
+         motionState->timestamp = timestamp;
+         motionState->hostTimestamp = timestamp;
+diff --git a/vita3k/modules/SceDriverUser/SceRtcUser.cpp b/vita3k/modules/SceDriverUser/SceRtcUser.cpp
+--- a/vita3k/modules/SceDriverUser/SceRtcUser.cpp
++++ b/vita3k/modules/SceDriverUser/SceRtcUser.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include "../SceRtc/SceRtc.h"
++#include <util/machine.h>
+ #include <module/module.h>
+ 
+ #include <rtc/rtc.h>
+@@ -148,7 +149,7 @@
+             pszDateTime += snprintf(pszDateTime, end - pszDateTime, "+%02d%02d", abs(tz_hour_diff), abs(tz_minute_diff));
+         }
+     } else { // format current time
+-        time_t time = std::time(nullptr);
++        time_t time = machine::calendar_time();
+         tm local_time = {};
+         tm gmt = {};
+ 
+diff --git a/vita3k/modules/SceGxm/SceGxm.cpp b/vita3k/modules/SceGxm/SceGxm.cpp
+--- a/vita3k/modules/SceGxm/SceGxm.cpp
++++ b/vita3k/modules/SceGxm/SceGxm.cpp
+@@ -2894,7 +2894,7 @@
+ 
+     // Reset the queue in case sceGxmTerminate was called earlier
+     emuenv.gxm.display_queue.reset();
+-    emuenv.gxm.display_host_thread = std::thread(display_entry_thread, std::ref(emuenv));
++    emuenv.gxm.display_host_thread = machine::thread(display_entry_thread, std::ref(emuenv));
+     emuenv.gxm.notification_region = Ptr<uint32_t>(alloc(emuenv.mem, MiB(1), "SceGxmNotificationRegion"));
+     memset(emuenv.gxm.notification_region.get(emuenv.mem), 0, MiB(1));
+     return 0;
+@@ -4695,7 +4695,7 @@
+             if (it->first.vertex_program.program == rp->program) {
+                 SceGxmVertexProgram *vertex_program = it->second.get(emuenv.mem);
+                 while (vertex_program->compile_threads_on.load(std::memory_order_acquire) > 0)
+-                    std::this_thread::yield();
++                    machine::yield();
+ 
+                 free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
+                 it = shaderPatcher->vertex_program_cache.erase(it);
+@@ -4708,7 +4708,7 @@
+             if (it->first.fragment_program.program == rp->program) {
+                 SceGxmFragmentProgram *frag_program = it->second.get(emuenv.mem);
+                 while (frag_program->compile_threads_on.load(std::memory_order_acquire) > 0)
+-                    std::this_thread::yield();
++                    machine::yield();
+ 
+                 free_callbacked(emuenv, thread_id, shaderPatcher, it->second.address());
+                 it = shaderPatcher->fragment_program_cache.erase(it);
+@@ -4807,7 +4807,7 @@
+     --fp->reference_count;
+     if (fp->reference_count == 0) {
+         while (fp->compile_threads_on.load(std::memory_order_acquire) > 0)
+-            std::this_thread::yield();
++            machine::yield();
+ 
+         for (FragmentProgramCache::const_iterator it = shaderPatcher->fragment_program_cache.begin(); it != shaderPatcher->fragment_program_cache.end(); ++it) {
+             if (it->second == fragmentProgram) {
+@@ -4830,7 +4830,7 @@
+     --vp->reference_count;
+     if (vp->reference_count == 0) {
+         while (vp->compile_threads_on.load(std::memory_order_acquire) > 0)
+-            std::this_thread::yield();
++            machine::yield();
+ 
+         for (VertexProgramCache::const_iterator it = shaderPatcher->vertex_program_cache.begin(); it != shaderPatcher->vertex_program_cache.end(); ++it) {
+             if (it->second == vertexProgram) {
+diff --git a/vita3k/modules/SceKernelThreadMgr/SceThreadmgr.cpp b/vita3k/modules/SceKernelThreadMgr/SceThreadmgr.cpp
+--- a/vita3k/modules/SceKernelThreadMgr/SceThreadmgr.cpp
++++ b/vita3k/modules/SceKernelThreadMgr/SceThreadmgr.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include "SceThreadmgr.h"
++#include <util/machine.h>
+ #include <modules/module_parent.h>
+ 
+ #include <kernel/callback.h>
+@@ -33,9 +34,7 @@
+ TRACY_MODULE_NAME(SceThreadmgr);
+ 
+ inline static uint64_t get_current_time() {
+-    return std::chrono::duration_cast<std::chrono::microseconds>(
+-        std::chrono::high_resolution_clock::now().time_since_epoch())
+-        .count();
++    return machine::now_us();
+ }
+ 
+ EXPORT(int, __sceKernelCreateLwMutex, Ptr<SceKernelLwMutexWork> workarea, const char *name, unsigned int attr, Ptr<SceKernelCreateLwMutex_opt> opt) {
+@@ -1041,14 +1040,14 @@
+         return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+ 
+     const ThreadStatePtr thread = kernel.get_thread(thread_id);
+-    const Deadline deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
++    const Deadline deadline = machine::clock::now() + std::chrono::microseconds(delay_us);
+     return guest_result(thread->delay_until(deadline));
+ }
+ 
+ static int delay_thread_cb(EmuEnvState &emuenv, SceUID thread_id, SceUInt delay_us) {
+-    auto start = std::chrono::high_resolution_clock::now(); // Meseaure the time taken to process callbacks
++    auto start = machine::clock::now(); // Meseaure the time taken to process callbacks
+     process_callbacks(emuenv.kernel, thread_id);
+-    auto end = std::chrono::high_resolution_clock::now();
++    auto end = machine::clock::now();
+     auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+ 
+     if (delay_us > elapsed.count()) // If we spent less time than requested processing callbacks, sleep the remaining time
+diff --git a/vita3k/modules/SceLibKernel/SceLibKernel.cpp b/vita3k/modules/SceLibKernel/SceLibKernel.cpp
+--- a/vita3k/modules/SceLibKernel/SceLibKernel.cpp
++++ b/vita3k/modules/SceLibKernel/SceLibKernel.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include "SceLibKernel.h"
++#include <util/machine.h>
+ #include <modules/module_parent.h>
+ #include <v3kprintf.h>
+ 
+@@ -56,9 +57,7 @@
+ TRACY_MODULE_NAME(SceLibKernel);
+ 
+ inline static uint64_t get_current_time() {
+-    return std::chrono::duration_cast<std::chrono::microseconds>(
+-        std::chrono::high_resolution_clock::now().time_since_epoch())
+-        .count();
++    return machine::now_us();
+ }
+ 
+ VAR_EXPORT(__sce_libcparam) {
+@@ -629,7 +628,7 @@
+     }
+ 
+     if (emuenv.cfg.current_config.file_loading_delay > 0)
+-        std::this_thread::sleep_for(std::chrono::milliseconds(emuenv.cfg.current_config.file_loading_delay));
++        machine::sleep_for(std::chrono::milliseconds(emuenv.cfg.current_config.file_loading_delay));
+ 
+     LOG_INFO("Opening file: {}", file);
+     return open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
+diff --git a/vita3k/modules/SceLibKernel/SceLibRng.cpp b/vita3k/modules/SceLibKernel/SceLibRng.cpp
+--- a/vita3k/modules/SceLibKernel/SceLibRng.cpp
++++ b/vita3k/modules/SceLibKernel/SceLibRng.cpp
+@@ -32,8 +32,14 @@
+         return RET_ERROR(SCE_RNG_ERROR_INVALID_ARGUMENT);
+     }
+ 
++#ifdef CHIMERA
++    // the machine's randomness is a fixed sequence: a seed from the host
++    // would make every run a different machine
++    static std::mt19937_64 mt(0x5650535649544133ull);
++#else
+     thread_local std::random_device dev;
+     thread_local std::mt19937_64 mt(dev());
++#endif
+     thread_local auto rng = [&]() { return mt(); };
+ 
+     int repeat = size / sizeof(uint64_t);
+diff --git a/vita3k/modules/SceProcessmgr/SceProcessmgr.cpp b/vita3k/modules/SceProcessmgr/SceProcessmgr.cpp
+--- a/vita3k/modules/SceProcessmgr/SceProcessmgr.cpp
++++ b/vita3k/modules/SceProcessmgr/SceProcessmgr.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include "SceProcessmgr.h"
++#include <util/machine.h>
+ 
+ #include <io/functions.h>
+ #include <kernel/state.h>
+@@ -193,7 +194,7 @@
+         timeAddr->tv_usec = ticks % VITA_CLOCKS_PER_SEC;
+     }
+     if (tzAddr != nullptr) {
+-        std::time_t t = std::time(nullptr);
++        std::time_t t = machine::calendar_time();
+ 
+         tm localtime_tm = {};
+ 
+diff --git a/vita3k/modules/SceRtc/SceRtc.cpp b/vita3k/modules/SceRtc/SceRtc.cpp
+--- a/vita3k/modules/SceRtc/SceRtc.cpp
++++ b/vita3k/modules/SceRtc/SceRtc.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include "SceRtc.h"
++#include <util/machine.h>
+ 
+ #include <kernel/state.h>
+ #include <rtc/rtc.h>
+@@ -33,7 +34,7 @@
+     if (pUtc == nullptr || pLocalTime == nullptr) {
+         return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+     }
+-    std::time_t t = std::time(nullptr);
++    std::time_t t = machine::calendar_time();
+ 
+     tm local_tm = {};
+     tm gmt_tm = {};
+@@ -54,7 +55,7 @@
+         return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+     }
+ 
+-    std::time_t t = std::time(nullptr);
++    std::time_t t = machine::calendar_time();
+ 
+     tm local_tm = {};
+     tm gmt_tm = {};
+@@ -111,7 +112,7 @@
+         return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+     }
+ 
+-    std::time_t t = std::time(nullptr);
++    std::time_t t = machine::calendar_time();
+ 
+     tm local_tm = {};
+     tm gmt_tm = {};
+diff --git a/vita3k/modules/SceSblSsMgr/SceSblRng.cpp b/vita3k/modules/SceSblSsMgr/SceSblRng.cpp
+--- a/vita3k/modules/SceSblSsMgr/SceSblRng.cpp
++++ b/vita3k/modules/SceSblSsMgr/SceSblRng.cpp
+@@ -32,8 +32,14 @@
+         return RET_ERROR(SCE_RNG_ERROR_INVALID_ARGUMENT);
+     }
+ 
++#ifdef CHIMERA
++    // the machine's randomness is a fixed sequence: a seed from the host
++    // would make every run a different machine
++    static std::mt19937_64 mt(0x5650535649544133ull);
++#else
+     thread_local std::random_device dev;
+     thread_local std::mt19937_64 mt(dev());
++#endif
+     thread_local auto rng = [&]() { return mt(); };
+ 
+     int repeat = size / sizeof(uint64_t);
+diff --git a/vita3k/motion/src/motion.cpp b/vita3k/motion/src/motion.cpp
+--- a/vita3k/motion/src/motion.cpp
++++ b/vita3k/motion/src/motion.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <motion/event_handler.h>
++#include <util/machine.h>
+ #include <motion/functions.h>
+ #include <motion/state.h>
+ 
+@@ -241,7 +242,7 @@
+ 
+     const uint64_t sensor_timestamp = (sensor.sensor_timestamp > 0)
+         ? to_microseconds(sensor.sensor_timestamp) // convert ns -> us
+-        : std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++        : std::chrono::duration_cast<std::chrono::microseconds>(machine::clock::now().time_since_epoch()).count();
+ 
+     auto sensor_data = get_processed_sensor_data();
+ 
+diff --git a/vita3k/ngs/include/ngs/scheduler.h b/vita3k/ngs/include/ngs/scheduler.h
+--- a/vita3k/ngs/include/ngs/scheduler.h
++++ b/vita3k/ngs/include/ngs/scheduler.h
+@@ -22,6 +22,7 @@
+ #include <mem/ptr.h>
+ 
+ #include <condition_variable>
++#include <util/machine.h>
+ #include <queue>
+ #include <vector>
+ 
+@@ -61,7 +62,7 @@
+     std::queue<OperationPending> operations_pending;
+ 
+     std::recursive_mutex mutex;
+-    std::condition_variable_any condvar;
++    machine::condition_variable condvar;
+     bool is_updating = false;
+ 
+ protected:
+diff --git a/vita3k/np/src/trophy/context.cpp b/vita3k/np/src/trophy/context.cpp
+--- a/vita3k/np/src/trophy/context.cpp
++++ b/vita3k/np/src/trophy/context.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <io/device.h>
++#include <util/machine.h>
+ #include <io/functions.h>
+ #include <io/state.h>
+ #include <np/functions.h>
+@@ -256,7 +257,7 @@
+         *err = np::NpTrophyError::TROPHY_ERROR_NONE;
+     }
+ 
+-    unlock_timestamps[id] = std::time(nullptr);
++    unlock_timestamps[id] = machine::calendar_time();
+ 
+     save_trophy_progress_file();
+ 
+diff --git a/vita3k/overlay/include/overlay/display_manager.h b/vita3k/overlay/include/overlay/display_manager.h
+--- a/vita3k/overlay/include/overlay/display_manager.h
++++ b/vita3k/overlay/include/overlay/display_manager.h
+@@ -21,6 +21,7 @@
+ #pragma once
+ 
+ #include <overlay/user_interface.h>
++#include <util/machine.h>
+ 
+ #include <algorithm>
+ #include <condition_variable>
+@@ -70,13 +71,13 @@
+     set_intercept_callback_t m_set_intercepted;
+     poll_touch_callback_t m_poll_touch;
+ 
+-    std::thread m_input_thread;
++    machine::thread m_input_thread;
+     std::deque<input_thread_context_t> m_input_token_stack;
+     std::atomic<bool> m_input_thread_abort{ false };
+     std::atomic<bool> m_input_thread_interrupted{ false };
+     std::atomic<bool> m_paused{ false };
+     std::mutex m_input_stack_guard;
+-    std::condition_variable m_input_stack_cv;
++    machine::condition_variable m_input_stack_cv;
+ 
+     // Callback to request an async present from the render thread.
+     std::function<void()> m_flip_request;
+diff --git a/vita3k/overlay/include/overlay/overlay.h b/vita3k/overlay/include/overlay/overlay.h
+--- a/vita3k/overlay/include/overlay/overlay.h
++++ b/vita3k/overlay/include/overlay/overlay.h
+@@ -21,6 +21,7 @@
+ #pragma once
+ 
+ #include <overlay/compiled_resource.h>
++#include <util/machine.h>
+ 
+ #include <atomic>
+ #include <chrono>
+@@ -101,7 +102,7 @@
+     virtual void set_render_viewport(uint16_t /*width*/, uint16_t /*height*/) {}
+ 
+ private:
+-    std::chrono::steady_clock::time_point last_refresh_time{};
++    machine::clock::time_point last_refresh_time{};
+ };
+ 
+ } // namespace overlay
+diff --git a/vita3k/overlay/include/overlay/shader_compile_notice.h b/vita3k/overlay/include/overlay/shader_compile_notice.h
+--- a/vita3k/overlay/include/overlay/shader_compile_notice.h
++++ b/vita3k/overlay/include/overlay/shader_compile_notice.h
+@@ -18,6 +18,7 @@
+ #pragma once
+ 
+ #include <overlay/controls.h>
++#include <util/machine.h>
+ #include <overlay/overlay.h>
+ 
+ #include <chrono>
+@@ -37,7 +38,7 @@
+     label m_label;
+     rounded_rect m_background;
+     uint32_t m_compiled_count = 0;
+-    std::chrono::steady_clock::time_point m_last_update_time;
++    machine::clock::time_point m_last_update_time;
+ 
+     static constexpr uint16_t k_pad_x = 10;
+     static constexpr uint16_t k_pad_y_top = 2;
+diff --git a/vita3k/overlay/src/animation.cpp b/vita3k/overlay/src/animation.cpp
+--- a/vita3k/overlay/src/animation.cpp
++++ b/vita3k/overlay/src/animation.cpp
+@@ -19,6 +19,7 @@
+ // Code heavily referenced/taken from https://github.com/RPCS3/rpcs3/tree/master/rpcs3/Emu/RSX/Overlays
+ 
+ #include <overlay/animation.h>
++#include <util/machine.h>
+ #include <overlay/compiled_resource.h>
+ 
+ #include <cmath>
+@@ -28,7 +29,7 @@
+ uint64_t animation_base::get_timestamp_us() {
+     return static_cast<uint64_t>(
+         std::chrono::duration_cast<std::chrono::microseconds>(
+-            std::chrono::steady_clock::now().time_since_epoch())
++            machine::clock::now().time_since_epoch())
+             .count());
+ }
+ 
+diff --git a/vita3k/overlay/src/common_dialog.cpp b/vita3k/overlay/src/common_dialog.cpp
+--- a/vita3k/overlay/src/common_dialog.cpp
++++ b/vita3k/overlay/src/common_dialog.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <lang/state.h>
++#include <util/machine.h>
+ #include <overlay/common_dialog.h>
+ 
+ #include <dialog/state.h>
+@@ -1450,7 +1451,7 @@
+         const int16_t cursor_y = static_cast<int16_t>(field_top + k_ime_cursor_vpad);
+ 
+         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+-            std::chrono::steady_clock::now().time_since_epoch())
++            machine::clock::now().time_since_epoch())
+                             .count();
+         if ((ms % 1000) < 530) {
+             overlay_element cursor_line;
+diff --git a/vita3k/overlay/src/compiled_resource.cpp b/vita3k/overlay/src/compiled_resource.cpp
+--- a/vita3k/overlay/src/compiled_resource.cpp
++++ b/vita3k/overlay/src/compiled_resource.cpp
+@@ -19,6 +19,7 @@
+ // Code heavily referenced/taken from https://github.com/RPCS3/rpcs3/tree/master/rpcs3/Emu/RSX/Overlays
+ 
+ #include <overlay/compiled_resource.h>
++#include <util/machine.h>
+ 
+ namespace overlay {
+ 
+@@ -63,7 +64,7 @@
+ }
+ 
+ float compiled_resource::command_config::get_sinus_value() const {
+-    const auto now = std::chrono::steady_clock::now();
++    const auto now = machine::clock::now();
+     const auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+     const float time_ms = static_cast<float>(us / 1000);
+     return (time_ms * pulse_speed_modifier) - pulse_sinus_offset;
+diff --git a/vita3k/overlay/src/display_manager.cpp b/vita3k/overlay/src/display_manager.cpp
+--- a/vita3k/overlay/src/display_manager.cpp
++++ b/vita3k/overlay/src/display_manager.cpp
+@@ -19,6 +19,7 @@
+ // Code heavily referenced/taken from https://github.com/RPCS3/rpcs3/tree/master/rpcs3/Emu/RSX/Overlays
+ 
+ #include <overlay/display_manager.h>
++#include <util/machine.h>
+ 
+ #include <algorithm>
+ #include <cassert>
+@@ -201,7 +202,7 @@
+         // Lazily start the input thread on first attach.
+         if (!m_input_thread.joinable()) {
+             m_input_thread_abort.store(false);
+-            m_input_thread = std::thread([this]() { input_thread_loop(); });
++            m_input_thread = machine::thread([this]() { input_thread_loop(); });
+         }
+ 
+         m_input_token_stack.push_back({ name,
+diff --git a/vita3k/overlay/src/element.cpp b/vita3k/overlay/src/element.cpp
+--- a/vita3k/overlay/src/element.cpp
++++ b/vita3k/overlay/src/element.cpp
+@@ -19,6 +19,7 @@
+ // Code heavily referenced/taken from https://github.com/RPCS3/rpcs3/tree/master/rpcs3/Emu/RSX/Overlays
+ 
+ #include <overlay/element.h>
++#include <util/machine.h>
+ 
+ #include <chrono>
+ #include <cmath>
+@@ -75,7 +76,7 @@
+ void overlay_element::set_sinus_offset(float sinus_modifier) {
+     if (sinus_modifier >= 0) {
+         static constexpr float PI = 3.14159265f;
+-        const auto now = std::chrono::steady_clock::now();
++        const auto now = machine::clock::now();
+         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+         const float pulse_sinus_x = static_cast<float>(us / 1000) * pulse_speed_modifier;
+         pulse_sinus_offset = std::fmod(pulse_sinus_x + sinus_modifier * PI, 2.0f * PI);
+diff --git a/vita3k/overlay/src/overlay.cpp b/vita3k/overlay/src/overlay.cpp
+--- a/vita3k/overlay/src/overlay.cpp
++++ b/vita3k/overlay/src/overlay.cpp
+@@ -19,6 +19,7 @@
+ // Code heavily referenced/taken from https://github.com/RPCS3/rpcs3/tree/master/rpcs3/Emu/RSX/Overlays
+ 
+ #include <overlay/user_interface.h>
++#include <util/machine.h>
+ 
+ #include <array>
+ #include <chrono>
+@@ -30,7 +31,7 @@
+     if (!visible.load(std::memory_order_relaxed))
+         return;
+ 
+-    const auto now = std::chrono::steady_clock::now();
++    const auto now = machine::clock::now();
+     const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_refresh_time).count();
+     if (elapsed < static_cast<int64_t>(min_refresh_duration_us))
+         return;
+@@ -52,7 +53,7 @@
+     std::array<bool, static_cast<uint32_t>(pad_button::pad_button_max_enum)> last_button_state;
+     last_button_state.fill(true);
+ 
+-    auto timestamp = std::chrono::steady_clock::now();
++    auto timestamp = machine::clock::now();
+     auto initial_timestamp = timestamp;
+     pad_button last_auto_repeat_button = pad_button::pad_button_max_enum;
+ 
+@@ -69,12 +70,12 @@
+ 
+             if (!last_state) {
+                 // New press — reset auto-repeat
+-                timestamp = std::chrono::steady_clock::now();
++                timestamp = machine::clock::now();
+                 initial_timestamp = timestamp;
+                 last_auto_repeat_button = is_auto_repeat_button ? button_id : pad_button::pad_button_max_enum;
+                 on_button_pressed(button_id, false);
+             } else if (is_auto_repeat_button) {
+-                const auto now = std::chrono::steady_clock::now();
++                const auto now = machine::clock::now();
+                 const auto ms_since_initial = std::chrono::duration_cast<std::chrono::milliseconds>(now - initial_timestamp).count();
+                 const auto ms_since_last = std::chrono::duration_cast<std::chrono::milliseconds>(now - timestamp).count();
+ 
+@@ -120,7 +121,7 @@
+         if (input) {
+             // When emulation is paused, skip all input polling and dispatch
+             if (input->is_paused && input->is_paused() && !m_allow_input_on_pause) {
+-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
++                machine::sleep_for(std::chrono::milliseconds(1));
+                 continue;
+             }
+ 
+@@ -138,7 +139,7 @@
+ 
+         refresh();
+ 
+-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++        machine::sleep_for(std::chrono::milliseconds(1));
+     }
+ 
+     // Disable pad interception since this user interface has to be interactive.
+diff --git a/vita3k/overlay/src/shader_compile_notice.cpp b/vita3k/overlay/src/shader_compile_notice.cpp
+--- a/vita3k/overlay/src/shader_compile_notice.cpp
++++ b/vita3k/overlay/src/shader_compile_notice.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <overlay/shader_compile_notice.h>
++#include <util/machine.h>
+ #include <overlay/types.h>
+ 
+ #include <fmt/format.h>
+@@ -24,7 +25,7 @@
+ 
+ shader_compile_notice::shader_compile_notice() {
+     visible = true;
+-    m_last_update_time = std::chrono::steady_clock::now();
++    m_last_update_time = machine::clock::now();
+ 
+     m_background.back_color = { 0.f, 0.f, 0.f, 0.65f };
+     m_background.border_radius = 4;
+@@ -37,7 +38,7 @@
+ 
+ void shader_compile_notice::update_count(uint32_t total_compiled, bool is_vulkan) {
+     m_compiled_count = total_compiled;
+-    m_last_update_time = std::chrono::steady_clock::now();
++    m_last_update_time = machine::clock::now();
+     visible = true;
+ 
+     const char *kind = is_vulkan ? "pipeline" : "shader";
+@@ -60,7 +61,7 @@
+ }
+ 
+ bool shader_compile_notice::should_hide() const {
+-    const auto elapsed = std::chrono::steady_clock::now() - m_last_update_time;
++    const auto elapsed = machine::clock::now() - m_last_update_time;
+     return elapsed >= k_hide_delay;
+ }
+ 
+diff --git a/vita3k/renderer/include/renderer/gxm_types.h b/vita3k/renderer/include/renderer/gxm_types.h
+--- a/vita3k/renderer/include/renderer/gxm_types.h
++++ b/vita3k/renderer/include/renderer/gxm_types.h
+@@ -27,6 +27,7 @@
+ 
+ #include <array>
+ #include <condition_variable>
++#include <util/machine.h>
+ #include <memory>
+ #include <mutex>
+ 
+@@ -182,7 +183,7 @@
+     bool being_deleted = false;
+ 
+     std::mutex lock;
+-    std::condition_variable cond;
++    machine::condition_variable cond;
+ };
+ 
+ struct GxmContextState {
+diff --git a/vita3k/renderer/include/renderer/state.h b/vita3k/renderer/include/renderer/state.h
+--- a/vita3k/renderer/include/renderer/state.h
++++ b/vita3k/renderer/include/renderer/state.h
+@@ -27,6 +27,7 @@
+ #include <atomic>
+ #include <chrono>
+ #include <condition_variable>
++#include <util/machine.h>
+ #include <functional>
+ #include <mutex>
+ #include <string>
+@@ -103,10 +104,10 @@
+ 
+     GXPPtrMap gxp_ptr_map;
+     Queue<CommandList> command_buffer_queue;
+-    std::condition_variable command_finish_one;
++    machine::condition_variable command_finish_one;
+     std::mutex command_finish_one_mutex;
+ 
+-    std::condition_variable notification_ready;
++    machine::condition_variable notification_ready;
+     std::mutex notification_mutex;
+ 
+     std::vector<ShadersHash> shaders_cache_hashs;
+@@ -123,7 +124,7 @@
+     std::atomic<bool> async_flip_requested{ false };
+     std::atomic<int> pending_vsync{ -1 };
+ 
+-    std::unique_ptr<std::thread> render_thread;
++    std::unique_ptr<machine::thread> render_thread;
+     std::atomic<bool> render_abort{ false };
+ 
+     std::vector<ShadersHash> precompile_queue;
+@@ -146,7 +147,7 @@
+     bool show_compile_shaders = true;
+ 
+     uint32_t m_shaders_compiled_count = 0;
+-    std::chrono::steady_clock::time_point m_shaders_compiled_time{};
++    machine::clock::time_point m_shaders_compiled_time{};
+ 
+     std::atomic<bool> paused{ false };
+ 
+diff --git a/vita3k/renderer/src/batch.cpp b/vita3k/renderer/src/batch.cpp
+--- a/vita3k/renderer/src/batch.cpp
++++ b/vita3k/renderer/src/batch.cpp
+@@ -30,6 +30,8 @@
+ #include <overlay/shader_precompile_progress.h>
+ #include <util/log.h>
+ 
++#include <algorithm>
++#include <climits>
+ #include <memory>
+ #include <thread>
+ 
+@@ -75,6 +77,15 @@
+     return renderer::wishlist(sync, timestamp, 500);
+ }
+ 
++#ifdef CHIMERA
++// wait_cmd with a timeout of the caller's choosing
++static renderer::SyncWaitResult wait_cmd_for(MemState &mem, CommandList &command_list, int32_t timeout_micros) {
++    SceGxmSyncObject *sync = reinterpret_cast<Ptr<SceGxmSyncObject> *>(&command_list.first->data[0])->get(mem);
++    const uint32_t timestamp = *reinterpret_cast<uint32_t *>(&command_list.first->data[sizeof(uint32_t)]);
++    return renderer::wishlist(sync, timestamp, timeout_micros);
++}
++#endif
++
+ static void process_batch(renderer::State &state, const FeatureState &features, MemState &mem, Config &config, CommandList &command_list) {
+     using CommandHandlerFunc = decltype(cmd_handle_set_context);
+ 
+@@ -132,7 +143,7 @@
+ }
+ 
+ void process_batches(renderer::State &state, const FeatureState &features, MemState &mem, Config &config, int64_t max_wait_ms) {
+-    auto max_time = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + max_wait_ms;
++    auto max_time = duration_cast<std::chrono::milliseconds>(machine::clock::now().time_since_epoch()).count() + max_wait_ms;
+ 
+     while (!state.should_display) {
+         if (state.render_abort.load(std::memory_order_relaxed))
+@@ -164,7 +175,7 @@
+                 if (state.async_flip_requested.load(std::memory_order_relaxed))
+                     return;
+ 
+-                auto curr_time = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
++                auto curr_time = duration_cast<std::chrono::milliseconds>(machine::clock::now().time_since_epoch()).count();
+                 if (curr_time >= max_time)
+                     // display a frame even though the game is not diplaying anything
+                     return;
+@@ -245,6 +256,59 @@
+             state.swap_window();
+         }
+     }
++#ifdef CHIMERA
++    // Under the machine's scheduler: every command list as soon as it is
++    // ready, and one present a vblank - or at once, when the game flips
++    // (should_display). It never polls: it waits for a command list, for the
++    // sync object one waits on, or until just past the next vblank (1 us past,
++    // so the vblank thread, due at the same moment, has always run first).
++    uint64_t presented = display.vblank_count.load();
++    while (!state.render_abort.load(std::memory_order_relaxed)) {
++        if (!state.set_current())
++            break;
++
++        const auto next_vblank = machine::clock::time_point(std::chrono::nanoseconds(
++            VSCHED_START_NS + (presented + 1) * 1000000000ull / 60 + 1000));
++        while (!state.should_display && !state.render_abort.load(std::memory_order_relaxed)) {
++            auto cmd_list = state.command_buffer_queue.top_until(next_vblank);
++            if (!cmd_list)
++                break;
++            if (!is_cmd_ready(mem, *cmd_list)) {
++                const auto left = std::chrono::duration_cast<std::chrono::microseconds>(next_vblank - machine::clock::now()).count();
++                if (left <= 0 || wait_cmd_for(mem, *cmd_list, static_cast<int32_t>(std::min<int64_t>(left + 1, INT32_MAX))) != renderer::SyncWaitResult::Ready)
++                    break;
++            }
++            state.command_buffer_queue.pop();
++            process_batch(state, state.features, mem, config, *cmd_list);
++        }
++
++        if (state.render_abort.load(std::memory_order_relaxed))
++            break;
++
++        const uint64_t vblank = display.vblank_count.load();
++        if (!state.should_display && vblank == presented)
++            continue;
++        presented = vblank;
++
++        if (state.overlay_manager) {
++            auto precompile = state.overlay_manager->get<overlay::shader_precompile_progress>();
++            if (precompile) {
++                DisplayFrameInfo peek;
++                {
++                    std::lock_guard<std::mutex> guard(display.display_info_mutex);
++                    peek = display.next_rendered_frame;
++                }
++                if (peek.base) {
++                    state.overlay_manager->remove<overlay::shader_precompile_progress>();
++                }
++            }
++        }
++
++        state.render_frame(display, gxm, mem);
++        state.swap_window();
++        state.async_flip_requested.store(false, std::memory_order_relaxed);
++    }
++#else
+     while (!state.render_abort.load(std::memory_order_relaxed)) {
+ #ifdef TRACY_ENABLE
+         ZoneScopedN("Game rendering");
+@@ -280,12 +344,14 @@
+ #endif
+     }
+ 
++#endif
++
+     state.done_current();
+ }
+ 
+ void start_render_thread(State &state, DisplayState &display, GxmState &gxm, MemState &mem, Config &config) {
+     state.render_abort = false;
+-    state.render_thread = std::make_unique<std::thread>(render_loop, std::ref(state), std::ref(display), std::ref(gxm), std::ref(mem), std::ref(config));
++    state.render_thread = std::make_unique<machine::thread>(render_loop, std::ref(state), std::ref(display), std::ref(gxm), std::ref(mem), std::ref(config));
+ }
+ 
+ void stop_render_thread(State &state) {
+diff --git a/vita3k/renderer/src/gl/overlay_renderer.cpp b/vita3k/renderer/src/gl/overlay_renderer.cpp
+--- a/vita3k/renderer/src/gl/overlay_renderer.cpp
++++ b/vita3k/renderer/src/gl/overlay_renderer.cpp
+@@ -458,7 +458,7 @@
+ 
+     const auto timestamp_us = static_cast<uint64_t>(
+         std::chrono::duration_cast<std::chrono::microseconds>(
+-            std::chrono::steady_clock::now().time_since_epoch())
++            machine::clock::now().time_since_epoch())
+             .count());
+ 
+     std::vector<std::shared_ptr<overlay::overlay>> views_snapshot;
+diff --git a/vita3k/renderer/src/gl/surface_cache.cpp b/vita3k/renderer/src/gl/surface_cache.cpp
+--- a/vita3k/renderer/src/gl/surface_cache.cpp
++++ b/vita3k/renderer/src/gl/surface_cache.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <gxm/functions.h>
++#include <util/machine.h>
+ #include <renderer/gl/functions.h>
+ #include <renderer/gl/surface_cache.h>
+ #include <renderer/gl/types.h>
+@@ -301,7 +302,7 @@
+ 
+                 if ((start_sourced_line != 0) || (start_x != 0) || (info.width != width) || (info.height != height) || (info.format != base_format)) {
+                     std::uint64_t current_time = std::chrono::duration_cast<std::chrono::seconds>(
+-                        std::chrono::steady_clock::now().time_since_epoch())
++                        machine::clock::now().time_since_epoch())
+                                                      .count();
+ 
+                     std::vector<std::unique_ptr<GLCastedTexture>> &casted_vec = info.casted_textures;
+diff --git a/vita3k/renderer/src/renderer.cpp b/vita3k/renderer/src/renderer.cpp
+--- a/vita3k/renderer/src/renderer.cpp
++++ b/vita3k/renderer/src/renderer.cpp
+@@ -40,7 +40,7 @@
+         return;
+ 
+     if (show_compile_shaders) {
+-        const auto now = std::chrono::steady_clock::now();
++        const auto now = machine::clock::now();
+         const uint32_t newly_compiled = shaders_count_compiled;
+         if (newly_compiled > 0) {
+             m_shaders_compiled_count += newly_compiled;
+diff --git a/vita3k/rtc/src/rtc.cpp b/vita3k/rtc/src/rtc.cpp
+--- a/vita3k/rtc/src/rtc.cpp
++++ b/vita3k/rtc/src/rtc.cpp
+@@ -16,17 +16,23 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <rtc/rtc.h>
++#include <util/machine.h>
+ 
+ #include <util/log.h>
+ 
+ static std::uint64_t rtc_ticks_since_epoch() {
+-    const auto now = std::chrono::high_resolution_clock::now();
++    const auto now = machine::clock::now();
+     const auto now_timepoint = std::chrono::time_point_cast<VitaClocks>(now);
+     return now_timepoint.time_since_epoch().count();
+ }
+ 
+ std::uint64_t rtc_base_ticks() {
++#ifdef CHIMERA
++    // exact to the microsecond: the machine's calendar, not whole seconds
++    return RTC_OFFSET + machine::calendar_us() - rtc_ticks_since_epoch();
++#else
+     return RTC_OFFSET + std::time(nullptr) * VITA_CLOCKS_PER_SEC - rtc_ticks_since_epoch();
++#endif
+ }
+ 
+ std::uint64_t rtc_get_ticks(uint64_t base_ticks) {
+diff --git a/vita3k/threads/include/threads/queue.h b/vita3k/threads/include/threads/queue.h
+--- a/vita3k/threads/include/threads/queue.h
++++ b/vita3k/threads/include/threads/queue.h
+@@ -21,6 +21,7 @@
+ #include <atomic>
+ #include <chrono>
+ #include <condition_variable>
++#include <util/machine.h>
+ #include <memory>
+ #include <mutex>
+ #include <queue>
+@@ -53,6 +54,17 @@
+         return std::make_unique<T>(item);
+     }
+ 
++    // The front item, waiting for one until the deadline at most.
++    std::unique_ptr<T> top_until(machine::clock::time_point deadline) {
++        std::unique_lock<std::mutex> mlock(mutex_);
++        while (!aborted && queue_.empty())
++            if (condempty_.wait_until(mlock, deadline) == std::cv_status::timeout)
++                break;
++        if (aborted || queue_.empty())
++            return {};
++        return std::make_unique<T>(queue_.front());
++    }
++
+     std::unique_ptr<T> pop(const int ms = 0) {
+         T item{ T() };
+         {
+@@ -129,8 +141,8 @@
+     }
+ 
+ private:
+-    std::condition_variable cond_;
+-    std::condition_variable condempty_;
++    machine::condition_variable cond_;
++    machine::condition_variable condempty_;
+     std::queue<T> queue_;
+     std::mutex mutex_;
+     std::atomic<bool> aborted{ false };
+diff --git a/vita3k/touch/src/touch.cpp b/vita3k/touch/src/touch.cpp
+--- a/vita3k/touch/src/touch.cpp
++++ b/vita3k/touch/src/touch.cpp
+@@ -16,6 +16,7 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ #include <ctrl/state.h>
++#include <util/machine.h>
+ #include <dialog/state.h>
+ #include <display/functions.h>
+ #include <display/state.h>
+@@ -91,7 +92,7 @@
+ 
+ void touch_vsync_update(EmuEnvState &emuenv) {
+     auto &touch = emuenv.touch;
+-    std::chrono::time_point<std::chrono::steady_clock> ts = std::chrono::steady_clock::now();
++    machine::clock::time_point ts = machine::clock::now();
+     uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(ts.time_since_epoch()).count();
+ 
+     // disable mouse support on android because the touchscreen is considered as a mouse, and this creates a mess
+diff --git a/vita3k/util/CMakeLists.txt b/vita3k/util/CMakeLists.txt
+--- a/vita3k/util/CMakeLists.txt
++++ b/vita3k/util/CMakeLists.txt
+@@ -19,6 +19,9 @@
+ target_include_directories(util PUBLIC include)
+ target_link_libraries(util PUBLIC ${Boost_LIBRARIES} fmt spdlog http mem)
+ target_link_libraries(util PRIVATE libcurl crypto SDL3::SDL3)
++if(CHIMERA_HEADLESS)
++	target_link_libraries(util PUBLIC chimera)
++endif()
+ if(ANDROID)
+ 	target_link_libraries(util PUBLIC emuenv android xxHash::xxhash)
+ 	target_link_libraries(util PRIVATE adrenotools)
+diff --git a/vita3k/util/include/util/machine.h b/vita3k/util/include/util/machine.h
+new file mode 100644
+--- /dev/null
++++ b/vita3k/util/include/util/machine.h
+@@ -0,0 +1,91 @@
++// Vita3K emulator project
++// Copyright (C) 2026 Vita3K team
++//
++// This program is free software; you can redistribute it and/or modify
++// it under the terms of the GNU General Public License as published by
++// the Free Software Foundation; either version 2 of the License, or
++// (at your option) any later version.
++//
++// This program is distributed in the hope that it will be useful,
++// but WITHOUT ANY WARRANTY; without even the implied warranty of
++// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++// GNU General Public License for more details.
++//
++// You should have received a copy of the GNU General Public License along
++// with this program; if not, write to the Free Software Foundation, Inc.,
++// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
++
++// The machine's threads, clock and waits. Upstream these are the host's;
++// in a Chimera core (CHIMERA) they are the machine's own scheduler and
++// virtual clock (chimera/sync.h), so a run does not depend on the host.
++#pragma once
++
++#include <chrono>
++#include <cstdint>
++#include <ctime>
++#include <condition_variable>
++#include <thread>
++
++#ifdef CHIMERA
++#include <chimera/sync.h>
++#endif
++
++namespace machine {
++
++#ifdef CHIMERA
++using condition_variable = chimera::condition_variable;
++using thread = chimera::thread;
++using clock = chimera::vclock;
++
++template <class Rep, class Period>
++inline void sleep_for(std::chrono::duration<Rep, Period> d) {
++    chimera::sleep_for(d);
++}
++inline void sleep_until(clock::time_point tp) {
++    chimera::sleep_until(tp);
++}
++inline void yield() {
++    chimera::yield();
++}
++#else
++using condition_variable = std::condition_variable;
++using thread = std::thread;
++using clock = std::chrono::steady_clock;
++
++template <class Rep, class Period>
++inline void sleep_for(std::chrono::duration<Rep, Period> d) {
++    std::this_thread::sleep_for(d);
++}
++inline void sleep_until(clock::time_point tp) {
++    std::this_thread::sleep_until(tp);
++}
++inline void yield() {
++    std::this_thread::yield();
++}
++#endif
++
++// The calendar: microseconds since the Unix epoch, and whole seconds (what
++// std::time gives upstream). In a Chimera core it is the machine's, starting
++// at a fixed date and carried forward by machine time.
++inline uint64_t calendar_us() {
++#ifdef CHIMERA
++    return vsched_calendar_us();
++#else
++    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count());
++#endif
++}
++inline std::time_t calendar_time() {
++#ifdef CHIMERA
++    return static_cast<std::time_t>(vsched_calendar_us() / 1000000ull);
++#else
++    return std::time(nullptr);
++#endif
++}
++
++// Microseconds of machine time since the machine started (upstream: since
++// the host's clock epoch); differences are what callers use.
++inline uint64_t now_us() {
++    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(clock::now().time_since_epoch()).count());
++}
++
++} // namespace machine
+diff --git a/vita3k/util/include/util/pool.h b/vita3k/util/include/util/pool.h
+--- a/vita3k/util/include/util/pool.h
++++ b/vita3k/util/include/util/pool.h
+@@ -18,6 +18,7 @@
+ #pragma once
+ 
+ #include <condition_variable>
++#include <util/machine.h>
+ #include <functional>
+ #include <map>
+ #include <mutex>
+@@ -60,7 +61,7 @@
+     }
+ 
+     std::mutex mutex;
+-    std::condition_variable cond;
++    machine::condition_variable cond;
+     std::vector<Ptr> items;
+     std::set<int> free_ids;
+ 

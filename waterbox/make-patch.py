@@ -67,6 +67,10 @@ for line in git('status', '--porcelain', '--untracked-files=all').decode().split
     path = line[3:]
     if ' -> ' in path:
         path = path.split(' -> ')[1]
+    # a nested submodule (Boost's build writes into external/boost) is not
+    # this tree's to patch
+    if os.path.isdir(os.path.join(tree, path)):
+        continue
     changed.add(path)
 
 with tempfile.TemporaryDirectory() as scratch:

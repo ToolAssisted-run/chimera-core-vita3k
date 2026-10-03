@@ -1,11 +1,13 @@
 // The native reference: installs a .vpk into a fresh work directory, boots it
 // under Vita3K with no window, and reports what it presented.
 //
-// M0: a frame is one of the machine's vblanks, and the host clock times the
-// machine. Frames become machine time when the virtual clock arrives (M1).
+// The machine runs on its own scheduler and clock (vsched): this thread is
+// its thread 0, and frame f ends at exactly f/60 s of machine time, so two
+// runs of the same app are the same run.
 //
 // usage: vita3k-run-native <app.vpk> --work <dir> [--frames N] [--timeout S]
 //                          [--digest-every N] [--screenshot F=PATH]...
+//                          [--cpu-mhz N] [--rtc-start UNIX_SECONDS]
 
 #include "archive.h"
 #include "headless_frame.h"
@@ -21,9 +23,9 @@
 #include <util/fs.h>
 #include <util/log.h>
 
-#include <SDL3/SDL_hints.h>
-#include <SDL3/SDL_init.h>
+#include <chimera/vsched.h>
 
+#include <time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -98,6 +100,7 @@ int main(int argc, char **argv) {
     std::string vpk, work_arg;
     uint64_t frames = 300, digest_every = 0;
     int timeout_s = 120;
+    uint64_t cpu_mhz = 0, rtc_start = 0;
     std::map<uint64_t, std::string> screenshots;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -107,6 +110,10 @@ int main(int argc, char **argv) {
             frames = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "--timeout" && i + 1 < argc)
             timeout_s = std::atoi(argv[++i]);
+        else if (a == "--cpu-mhz" && i + 1 < argc)
+            cpu_mhz = std::strtoull(argv[++i], nullptr, 10);
+        else if (a == "--rtc-start" && i + 1 < argc)
+            rtc_start = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "--digest-every" && i + 1 < argc)
             digest_every = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "--screenshot" && i + 1 < argc) {
@@ -128,6 +135,19 @@ int main(int argc, char **argv) {
         std::fprintf(stderr, "usage: vita3k-run-native <app.vpk> --work <dir> [--frames N] [--timeout S] [--digest-every N] [--screenshot F=PATH]...\n");
         return 2;
     }
+
+    // The machine's clock starts here, on this thread, before anything of the
+    // emulator exists; every thread it makes is scheduled from then on.
+    vsched_init();
+    if (cpu_mhz)
+        vsched_set_cpu_hz(cpu_mhz * 1000000ull);
+    if (rtc_start)
+        vsched_set_calendar_start(rtc_start);
+    // a timezone from the host would show in the dates the machine formats
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    // a machine that stops running is stopped by the host, not waited on
+    alarm(static_cast<unsigned>(timeout_s));
 
     const fs::path work = fs::absolute(work_arg);
     if (!fresh_work_dir(work))
@@ -167,12 +187,14 @@ int main(int argc, char **argv) {
         return 3;
     }
 
-    // Sound goes nowhere for now (M4 takes it a frame at a time).
-    SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
-    if (!SDL_Init(SDL_INIT_AUDIO)) {
-        std::fprintf(stderr, "run-native: SDL audio: %s\n", SDL_GetError());
-        return 3;
-    }
+    // Nothing the host's state decides may reach the picture: no shader
+    // notices (they depend on what is cached), no compiling on worker threads,
+    // no shader cache on disk, no swap interval. The log keeps warnings only.
+    cfg.v_sync = false;
+    cfg.show_compile_shaders = false;
+    cfg.async_pipeline_compilation = false;
+    cfg.shader_cache = false;
+    cfg.log_level = 3;
 
     if (!app::init(emuenv, cfg, root_paths)) {
         std::fprintf(stderr, "run-native: the emulated environment could not be made\n");
@@ -207,37 +229,33 @@ int main(int argc, char **argv) {
         return 6;
     }
 
-    // A frame is one of the machine's vblanks (display.vblank_count, 60 a
-    // second): the renderer presents on every pass of its loop, picture or
-    // not, so presents are no clock. At each vblank the newest presented
-    // picture is the frame's.
-    const auto deadline = timeout_s * 1000;
-    uint64_t seen = 0;
-    int waited_ms = 0;
-    while (seen < frames && waited_ms < deadline) {
-        const uint64_t now = std::min<uint64_t>(emuenv.display.vblank_count.load(), frames);
-        if (now == seen) {
-            usleep(1000);
-            waited_ms += 1;
-            continue;
+    // Frame f ends 2 us after vblank f: the vblank thread runs at f/60 s
+    // exactly and the render thread presents 1 us later, so the newest
+    // picture then is the one vblank f shows.
+    uint64_t seen = 0, exited = 0;
+    for (uint64_t f = 1; f <= frames; f++) {
+        vsched_sleep_until(VSCHED_START_NS + f * 1000000000ull / 60 + 2000);
+        seen = f;
+        // An app that exits asks the frontend to relaunch it, or nothing:
+        // the machine stops where it stands, keeping the last picture.
+        if (emuenv.take_app_launch_request()) {
+            exited = f;
+            break;
         }
         const auto picture = frame.picture();
-        for (uint64_t f = seen + 1; f <= now; f++) {
-            if (digest_every != 0 && f % digest_every == 0)
-                std::printf("frame %" PRIu64 " video=%016" PRIx64 "\n", f, fnv1a(picture));
-            const auto shot = screenshots.find(f);
-            if (shot != screenshots.end() && !write_tga(shot->second, picture, SCREEN_W, SCREEN_H))
-                std::fprintf(stderr, "run-native: could not write %s\n", shot->second.c_str());
-        }
-        seen = now;
+        if (digest_every != 0 && f % digest_every == 0)
+            std::printf("frame %" PRIu64 " time_ns=%" PRIu64 " video=%016" PRIx64 "\n", f, vsched_now_ns(), fnv1a(picture));
+        const auto shot = screenshots.find(f);
+        if (shot != screenshots.end() && !write_tga(shot->second, picture, SCREEN_W, SCREEN_H))
+            std::fprintf(stderr, "run-native: could not write %s\n", shot->second.c_str());
     }
 
     const auto picture = frame.picture();
-    std::printf("title=%s frames=%" PRIu64 " video=%016" PRIx64 " %dx%d\n", title_id.c_str(), seen,
-        picture.empty() ? 0 : fnv1a(picture), SCREEN_W, SCREEN_H);
+    std::printf("title=%s frames=%" PRIu64 " exited=%" PRIu64 " time_ns=%" PRIu64 " switches=%" PRIu64 " video=%016" PRIx64 " %dx%d\n", title_id.c_str(), seen,
+        exited, vsched_now_ns(), vsched_switch_count(), picture.empty() ? 0 : fnv1a(picture), SCREEN_W, SCREEN_H);
     std::fflush(stdout);
 
     // Leave without tearing the machine down: guest threads are detached host
     // threads, and the process ending is the one stop they all obey.
-    std::_Exit(seen >= frames ? 0 : 7);
+    std::_Exit(seen >= frames || exited ? 0 : 7);
 }

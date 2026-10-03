@@ -36,7 +36,11 @@ Vulkan upstream.
   showcase in colour, ctrl's pad readout, rtc's dates, audio's tone, touch.
   The only errors logged are the two firmware kernel modules
   (os0:kd/bootimage.skprx, sysmodule.skprx) homebrew does without.
-- [ ] M1 virtual clock + scheduler: two native runs are identical.
+- [x] M1 virtual clock + scheduler (2026-10-03): two native runs are
+  identical frame by frame for all eight test apps, ThreadTest's 77,087
+  thread switches in 300 frames included, and with every host core busy.
+  Negative controls: 1 MHz less CPU changes every ThreadTest picture, another
+  start date every rtc picture.
 - [ ] M2 the sandbox build: native == sandbox. Speed on a real game decides
   whether to go on.
 - [ ] M3 GL through the bridge, rebuilt after a state load.
@@ -86,8 +90,72 @@ picture is the frame's. Until M1 the vblank thread keeps the host clock.
 
 No firmware and no game is needed to run the gate. vitasdk's prebuilt
 toolchain (pinned by SHA-256) builds vitasdk's samples (CC0, pinned by
-commit) into `.vpk` files: hello_world, debugscreen, ctrl, touch, rtc, audio
-(`waterbox/build-testapps.sh`).
+commit) into `.vpk` files: hello_world, debugscreen, ctrl, touch, rtc, audio,
+SDL2's redrectangle (GXM), and our ThreadTest (`waterbox/build-testapps.sh`).
+
+### The machine's scheduler and clock (2026-10-03)
+
+Patch 0002. Every thread of the machine is a vsched thread (the RPCS3
+core's scheduler, `vita3k/chimera`): one runs at a time, the running one
+hands the machine on explicitly, and time is what the machine charges.
+Upstream's sites keep their shape through `util/machine.h`: under CHIMERA
+`machine::condition_variable`, `machine::thread`, `machine::clock` and
+`machine::sleep_for` are the scheduler's, otherwise the standard library's.
+`chimera::condition_variable` takes only virtual-time deadlines, so a host
+clock left behind in a wait is a compile error; the whole conversion built
+with none left.
+
+- Threads: guest threads (no SDL thread, no semaphore hand-over: each holds
+  its own copy of its parameters), the render, vblank, GXM display and
+  overlay input threads.
+- The CPU: dynarmic's cycle counting is on. `AddTicks` charges the
+  instructions run at 1332 MHz - three cores' worth of a 444 MHz Cortex-A9
+  at one instruction a cycle, one timeline for every thread - with the
+  fraction of a nanosecond carried, and `GetTicksRemaining` is the thread's
+  slice (100,000 instructions). A JIT out of slice gives way and carries on.
+- The vblank: vblank k comes at exactly k/60 s of machine time. The
+  hardware's rate is 59.94 Hz (sceDisplayGetRefreshRate says so); upstream's
+  vblank thread runs at 60, and so does this one, until a game says
+  otherwise.
+- The render thread no longer polls (upstream waits 3 us for a command list,
+  in a loop): it runs each command list as soon as it is ready and presents
+  once a vblank, or at once when the game flips, waiting for a command
+  list, its sync object, or 1 us past the next vblank (so the vblank thread,
+  due at the same moment, always runs first).
+- Time: the RTC (`rtc_ticks_since_epoch`, `rtc_base_ticks`) and every clock
+  read in the modules and overlays are the machine's. The calendar starts
+  at 2013-01-01 00:00:00 UTC (a setting later) and runs with machine time;
+  the driver pins TZ to UTC, since Vita3K formats some dates in local time.
+- Randomness: sceKernelGetRandomNumber and SceSblRng are a fixed-seed
+  sequence.
+- Sound: a "Chimera" audio adapter with no host device. A port keeps the
+  moment its queued sound runs out, an output waits until no more than one
+  buffer is queued (the hardware double-buffers), and the samples are kept
+  for the frontend to take a frame at a time (M4).
+- The picture: no shader-compile notices (they depend on what is cached),
+  no asynchronous compiling, no shader cache, no swap interval.
+- Frame f ends 2 us after vblank f (the render thread presents 1 us after
+  it), and the driver is the scheduler's thread 0.
+
+Found on the way: Vita3K ignored sceDisplaySetFrameBuf(NULL), so the display
+kept reading a frame buffer the app then freed (vitasdk's debug screen does,
+at exit) and the render thread crashed. A NULL frame buffer now blanks the
+display, as the hardware's does. An app that exits stops the machine where
+it stands (`exited=` in run-native's last line).
+
+### The gate (2026-10-03)
+
+`waterbox/run-gate.sh`: every test app twice, compared frame by frame, plus
+the two negative controls. ThreadTest (`tests/apps/ThreadTest`, ours, CC0)
+is the scheduler made visible: three workers take turns at a kernel mutex,
+and the picture shows each one's share, the last 96 turns' owners, a square
+on the process clock and a frame-counted background, drawn through GXM with
+vita2d. vitasdk's packages (SDL2, vita2d, zlib, libpng) are a rolling
+release, pinned here by SHA-256.
+
+Trap: a dot in the work directory's name (`x.work`) makes one of Vita3K's
+path checks throw (boost create_directories, "Invalid argument"); the gate
+names them `<run>-work`.
 
 ## Open questions
 
