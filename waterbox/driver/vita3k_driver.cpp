@@ -100,12 +100,16 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
 
     // Nothing the host's state decides may reach the picture: no shader
     // notices (they depend on what is cached), no compiling on worker threads,
-    // no shader cache, no swap interval. The log keeps warnings only.
+    // no shader cache, no swap interval. The log keeps warnings only. Surface
+    // sync writes every finished scene back to the machine's memory, as the
+    // Vita's GPU does: a state then holds the pictures, and the renderer,
+    // rebuilt after a load, finds them there.
     cfg.v_sync = false;
     cfg.show_compile_shaders = false;
     cfg.async_pipeline_compilation = false;
     cfg.shader_cache = false;
     cfg.log_level = 3;
+    cfg.disable_surface_sync = options.no_surface_sync;
 
     if (!app::init(emuenv, cfg, root_paths)) {
         error = "the emulated environment could not be made";

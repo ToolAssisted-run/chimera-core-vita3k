@@ -19,6 +19,8 @@ typedef void (*PFN_FramebufferRenderbuffer)(unsigned int, unsigned int, unsigned
 typedef void (*PFN_ReadPixels)(int, int, int, int, unsigned int, unsigned int, void *);
 typedef void (*PFN_GetIntegerv)(unsigned int, int *);
 typedef void (*PFN_PixelStorei)(unsigned int, int);
+typedef void (*PFN_DeleteFramebuffers)(int, const unsigned int *);
+typedef void (*PFN_DeleteRenderbuffers)(int, const unsigned int *);
 
 constexpr unsigned int GL_FRAMEBUFFER_ = 0x8D40, GL_READ_FRAMEBUFFER_ = 0x8CA8,
                        GL_READ_FRAMEBUFFER_BINDING_ = 0x8CAA, GL_RENDERBUFFER_ = 0x8D41,
@@ -69,6 +71,24 @@ void BridgeFrame::done_current() {
 
 void BridgeFrame::prepare_for_render_thread() {
     done_current();
+}
+
+// the host says which context the calls land on: it moves when a state is
+// loaded (a fresh one in another process, a new id in the same one)
+uint64_t BridgeFrame::context_id() const {
+    return chimera_gl_context_id();
+}
+
+// The renderer dropped everything it remembered: the framebuffer goes too,
+// in the same breath, before any new name is made (renderer.cpp,
+// chimera_rebuild), and default_fbo makes it again.
+void BridgeFrame::lost_context() {
+    if (fbo)
+        gl<PFN_DeleteFramebuffers>("glDeleteFramebuffers")(1, &fbo);
+    if (color_rb)
+        gl<PFN_DeleteRenderbuffers>("glDeleteRenderbuffers")(1, &color_rb);
+    fbo = 0;
+    color_rb = 0;
 }
 
 void BridgeFrame::swap_buffers() {

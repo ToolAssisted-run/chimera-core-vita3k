@@ -101,6 +101,7 @@ ECL_EXPORT int Init(void) {
     chimera_vita3k::Options options;
     options.cpu_mhz = json_number(settings, "cpu_mhz");
     options.rtc_start = json_number(settings, "rtc_start");
+    options.no_surface_sync = json_number(settings, "no_surface_sync") != 0;
     return chimera_vita3k::boot(name, options, g_frame, g_error) ? 1 : 0;
 }
 

@@ -18,6 +18,7 @@ int chimera_gl_host_init(char *err, int errlen);
 const char *chimera_gl_host_description(void);
 uintptr_t chimera_gl_host_dispatch(uintptr_t op, uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
 unsigned long chimera_gl_host_unhandled(long *last_op);
+void chimera_gl_host_state_loaded(void);
 
 typedef struct { FILE *f; } freader;
 static intptr_t file_read(uintptr_t ud, uint8_t *d, uintptr_t s) { return (intptr_t)fread(d, 1, s, ((freader *)ud)->f); }
@@ -33,6 +34,68 @@ static intptr_t mem_reader(uintptr_t ud, uint8_t *d, uintptr_t s)
 }
 
 static mb_host *g_host;
+
+typedef struct { uint8_t *b; size_t len, cap, pos; } membuf;
+static int32_t mem_write(uintptr_t ud, const uint8_t *d, uintptr_t n)
+{
+	membuf *m = (membuf *)ud;
+	if (m->len + n > m->cap) {
+		size_t cap = m->cap ? m->cap * 2 : (64u << 20);
+		while (cap < m->len + n) cap *= 2;
+		uint8_t *b = (uint8_t *)realloc(m->b, cap);
+		if (!b) return -1;
+		m->b = b; m->cap = cap;
+	}
+	memcpy(m->b + m->len, d, n);
+	m->len += n;
+	return 0;
+}
+static intptr_t mem_read(uintptr_t ud, uint8_t *d, uintptr_t n)
+{
+	membuf *m = (membuf *)ud;
+	size_t left = m->len - m->pos;
+	if (n > left) n = left;
+	memcpy(d, m->b + m->pos, n);
+	m->pos += n;
+	return (intptr_t)n;
+}
+
+/* the post-boot machine is the savestate baseline */
+static int do_seal(void)
+{
+	mb_return r;
+	wbx_deactivate_host(g_host, &r);
+	wbx_seal(g_host, &r);
+	if (r.error_message[0]) { fprintf(stderr, "seal: %s\n", r.error_message); return 0; }
+	wbx_activate_host(g_host, &r);
+	return 1;
+}
+static int do_save(uint8_t **buf, size_t *len)
+{
+	membuf m = { 0 };
+	mb_return r;
+	wbx_save_state(g_host, mem_write, (uintptr_t)&m, &r);
+	if (r.error_message[0]) { fprintf(stderr, "save: %s\n", r.error_message); free(m.b); return 0; }
+	*buf = m.b;
+	*len = m.len;
+	return 1;
+}
+/* What Chimera's session does after a load (ce_gl_state_loaded): the host
+ * mints a fresh context id, the renderer's cue that what it remembers is
+ * another context's. Without it a load here would be an easier test than a
+ * load in Chimera. */
+static int do_load(const uint8_t *buf, size_t len)
+{
+	membuf m = { (uint8_t *)buf, len, len, 0 };
+	mb_return r;
+	wbx_load_state(g_host, mem_read, (uintptr_t)&m, &r);
+	if (r.error_message[0]) { fprintf(stderr, "load: %s\n", r.error_message); return 0; }
+	/* the gate's negative control: a load the renderer is not told about */
+	const char *keep = getenv("RUN_WBX_KEEP_CONTEXT");
+	if (!keep || !*keep)
+		chimera_gl_host_state_loaded();
+	return 1;
+}
 
 static uintptr_t proc(const char *n)
 {
@@ -107,6 +170,7 @@ int main(int argc, char **argv)
 		(uint64_t (*)(void))proc("GetSwitchCount"),
 		(int64_t (*)(void))proc("GetLogSize"),
 		(const uint8_t *(*)(void))proc("GetLogBuffer"),
+		do_seal, do_save, do_load,
 	};
 	const int rc = harness_run(&c, &o, base);
 	if (getenv("CHIMERA_LIST_FILES"))

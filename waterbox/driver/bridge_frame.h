@@ -34,6 +34,8 @@ public:
     void done_current() override;
     void swap_buffers() override;
     void prepare_for_render_thread() override;
+    uint64_t context_id() const override;
+    void lost_context() override;
 
     // the newest presented picture, BGRA top row first; empty before the
     // first present

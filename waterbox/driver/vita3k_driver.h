@@ -15,6 +15,9 @@ namespace chimera_vita3k {
 struct Options {
     uint64_t cpu_mhz = 0; // 0: the machine's (1332)
     uint64_t rtc_start = 0; // Unix seconds; 0: the machine's (2013-01-01)
+    // the gate's negative control: the GPU's pictures stay on the GPU, and a
+    // state cannot hold them
+    bool no_surface_sync = false;
 };
 
 // Boot the app read from `host_name` (a path natively, a mounted file's name

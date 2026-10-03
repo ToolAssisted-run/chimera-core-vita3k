@@ -1,7 +1,7 @@
 #!/bin/sh
 # The gate: every test app twice through the native reference and once in
-# the sandbox, frame by frame, and the negative controls that prove the
-# comparison can fail.
+# the sandbox, frame by frame; states in the sandbox, against the native run;
+# and the negative controls that prove the comparisons can fail.
 #
 #   run-gate.sh [-n]    -n: do not build (use build/native and build/testapps)
 #
@@ -79,6 +79,34 @@ twice audio_sample.vpk 300 "the tone, paced in machine time"
 twice sdl2_redrectangle.vpk 300 "SDL2's GXM renderer, then it exits"
 twice threadtest.vpk 300 "three threads' interleaving drawn through GXM"
 
+# States, on the app that draws through the GPU. A load puts the whole machine
+# back, pictures included (surface sync writes them to its memory), and the
+# renderer rebuilds every GL object in the context it finds after the load.
+# Both legs must print what the native run printed, frame for frame.
+grep '^frame' "$work/threadtest-a.out" | head -10 >"$work/threadtest-rerecord.want"
+r=$(sandboxed threadtest-rerecord threadtest.vpk 100 --rerecord)
+grep '^frame' "$work/threadtest-rerecord.out" >"$work/threadtest-rerecord.got"
+if [ "$r" != 0 ]; then
+	fail "threadtest with a state saved and loaded before every frame failed (exit $r; build/gate/threadtest-rerecord.err)"
+elif ! cmp -s "$work/threadtest-rerecord.want" "$work/threadtest-rerecord.got"; then
+	fail "threadtest, a state saved and loaded before every frame, differs from the native run - $(diff "$work/threadtest-rerecord.want" "$work/threadtest-rerecord.got" | sed -n 2p)"
+else
+	pass "threadtest with a state saved and loaded before every frame == the native run, $(grep -c 'rebuilding every GL object' "$work/threadtest-rerecord-work/vita3k.log") GL rebuilds in 100 frames"
+fi
+state="$work/threadtest-150.state"
+ra=$(sandboxed threadtest-save threadtest.vpk 150 --save-state "$state")
+rb=$(sandboxed threadtest-load threadtest.vpk 150 --state "$state")
+{ grep '^frame' "$work/threadtest-save.out"; grep -v '^loaded' "$work/threadtest-load.out"; } >"$work/threadtest-joined.out"
+loaded=$(sed -n 's/^loaded //p' "$work/threadtest-load.out")
+if [ "$ra" != 0 ] || [ "$rb" != 0 ]; then
+	fail "threadtest saved at frame 150 and carried on in another process failed (exit $ra, $rb)"
+elif [ "$loaded" != "$(grep '^frame 150 ' "$work/threadtest-a.out")" ] || ! cmp -s "$work/threadtest-a.out" "$work/threadtest-joined.out"; then
+	fail "threadtest carried on from a state in another process differs from one run - $(diff "$work/threadtest-a.out" "$work/threadtest-joined.out" | sed -n 2p)"
+else
+	pass "threadtest saved at frame 150 and carried on in another process == one native run; the state is $(($(wc -c <"$state") >> 20)) MiB"
+fi
+rm -f "$state"
+
 # Negative controls: what the machine is made of must show, or the legs above
 # compare nothing.
 r=$(native threadtest-1331 threadtest.vpk 300 --cpu-mhz 1331)
@@ -92,6 +120,13 @@ if [ "$r" = 0 ] && ! cmp -s "$work/rtc_sample-a.out" "$work/rtc-1400000000.out";
 	pass "the calendar is the machine's - another start date and every picture differs"
 else
 	fail "rtc_sample draws the same date from another start (exit $r)"
+fi
+r=$(sandboxed threadtest-nosync threadtest.vpk 100 --rerecord --no-surface-sync)
+grep '^frame' "$work/threadtest-nosync.out" >"$work/threadtest-nosync.got"
+if [ "$r" = 0 ] && ! cmp -s "$work/threadtest-rerecord.want" "$work/threadtest-nosync.got"; then
+	pass "a state holds the pictures only through surface sync - without it, $(diff "$work/threadtest-rerecord.want" "$work/threadtest-nosync.got" | grep -c '^>') of 10 pictures differ under rerecord"
+else
+	fail "threadtest without surface sync survives a load before every frame (exit $r): the state legs cannot see a lost picture"
 fi
 
 exit "$fails"

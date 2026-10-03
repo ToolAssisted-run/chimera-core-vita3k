@@ -1,0 +1,332 @@
+diff --git a/vita3k/renderer/include/renderer/frame_host.h b/vita3k/renderer/include/renderer/frame_host.h
+--- a/vita3k/renderer/include/renderer/frame_host.h
++++ b/vita3k/renderer/include/renderer/frame_host.h
+@@ -81,6 +81,14 @@
+ 
+     virtual void swap_buffers() {
+     }
++    // Chimera: which GL context the calls land on (it moves when a state is
++    // loaded: the objects the renderer remembers are then another context's),
++    // and the moment the renderer has dropped every one of them
++    virtual uint64_t context_id() const {
++        return 0;
++    }
++    virtual void lost_context() {
++    }
+ 
+     virtual bool set_vsync(bool enabled) {
+         return false;
+diff --git a/vita3k/renderer/include/renderer/gl/fence.h b/vita3k/renderer/include/renderer/gl/fence.h
+--- a/vita3k/renderer/include/renderer/gl/fence.h
++++ b/vita3k/renderer/include/renderer/gl/fence.h
+@@ -21,6 +21,13 @@
+ 
+ namespace renderer::gl {
+ 
++#ifdef CHIMERA
++// While set, a fence going away forgets its sync object instead of deleting
++// it: after a state is loaded into another process, a remembered GLsync is a
++// pointer that process's driver never made.
++extern bool g_fence_forget;
++#endif
++
+ class Fence {
+ private:
+     GLsync sync_;
+diff --git a/vita3k/renderer/include/renderer/gl/state.h b/vita3k/renderer/include/renderer/gl/state.h
+--- a/vita3k/renderer/include/renderer/gl/state.h
++++ b/vita3k/renderer/include/renderer/gl/state.h
+@@ -67,6 +67,14 @@
+ 
+     void precompile_shader(const ShadersHash &hash) override;
+     void preclose_action() override;
++
++#ifdef CHIMERA
++    uint64_t chimera_context = 0; // the context the objects were made in
++    bool chimera_hashless = false; // late_init's texture cache arguments
++    std::string chimera_game_id;
++    void chimera_check_context() override;
++    void chimera_rebuild();
++#endif
+ };
+ 
+ } // namespace renderer::gl
+diff --git a/vita3k/renderer/include/renderer/gl/types.h b/vita3k/renderer/include/renderer/gl/types.h
+--- a/vita3k/renderer/include/renderer/gl/types.h
++++ b/vita3k/renderer/include/renderer/gl/types.h
+@@ -18,6 +18,7 @@
+ #pragma once
+ 
+ #include <glutil/object.h>
++#include <set>
+ #include <glutil/object_array.h>
+ #include <renderer/types.h>
+ #include <util/hash.h>
+@@ -93,7 +94,13 @@
+     std::vector<size_t> self_sampling_indices;
+ 
+     explicit GLContext();
+-    ~GLContext() override = default;
++    ~GLContext() override;
++
++#ifdef CHIMERA
++    // the GL objects only: dropped when the context moves, then made again
++    void chimera_drop();
++    void chimera_make();
++#endif
+ };
+ 
+ struct GLShaderStatics {
+@@ -127,6 +134,14 @@
+     GLObjectArray<1> masktexture;
+     GLObjectArray<2> attachments;
+ 
+-    ~GLRenderTarget() override = default;
++    GLRenderTarget();
++    ~GLRenderTarget() override;
+ };
++
++#ifdef CHIMERA
++// every live context and render target, for the rebuild to reach (iterated in
++// address order, which the machine's own allocator decides)
++std::set<GLContext *> &live_contexts();
++std::set<GLRenderTarget *> &live_render_targets();
++#endif
+ } // namespace renderer::gl
+diff --git a/vita3k/renderer/include/renderer/state.h b/vita3k/renderer/include/renderer/state.h
+--- a/vita3k/renderer/include/renderer/state.h
++++ b/vita3k/renderer/include/renderer/state.h
+@@ -185,6 +185,10 @@
+     virtual void set_anisotropic_filtering(int anisotropic_filtering) = 0;
+     virtual int get_max_2d_texture_width() = 0;
+     virtual void set_async_compilation(bool enable) {}
++    // Chimera: rebuild every GPU object if the context moved (a state was
++    // loaded); the render thread asks whenever a wait returns, before it
++    // touches GL again
++    virtual void chimera_check_context() {}
+     void set_surface_sync_state(bool disable) {
+         disable_surface_sync = disable;
+     }
+diff --git a/vita3k/renderer/src/batch.cpp b/vita3k/renderer/src/batch.cpp
+--- a/vita3k/renderer/src/batch.cpp
++++ b/vita3k/renderer/src/batch.cpp
+@@ -262,6 +262,9 @@
+     // (should_display). It never polls: it waits for a command list, for the
+     // sync object one waits on, or until just past the next vblank (1 us past,
+     // so the vblank thread, due at the same moment, has always run first).
++    // Those waits are where a state can be saved, and so where a load wakes
++    // this thread: before it touches GL again it asks whether the context
++    // moved, and if so every GL object it remembers is rebuilt first.
+     uint64_t presented = display.vblank_count.load();
+     while (!state.render_abort.load(std::memory_order_relaxed)) {
+         if (!state.set_current())
+@@ -279,6 +282,7 @@
+                     break;
+             }
+             state.command_buffer_queue.pop();
++            state.chimera_check_context();
+             process_batch(state, state.features, mem, config, *cmd_list);
+         }
+ 
+@@ -304,6 +308,7 @@
+             }
+         }
+ 
++        state.chimera_check_context();
+         state.render_frame(display, gxm, mem);
+         state.swap_window();
+         state.async_flip_requested.store(false, std::memory_order_relaxed);
+diff --git a/vita3k/renderer/src/gl/fence.cpp b/vita3k/renderer/src/gl/fence.cpp
+--- a/vita3k/renderer/src/gl/fence.cpp
++++ b/vita3k/renderer/src/gl/fence.cpp
+@@ -28,7 +28,15 @@
+     , signaled_(false) {
+ }
+ 
++#ifdef CHIMERA
++bool g_fence_forget = false;
++#endif
++
+ Fence::~Fence() {
++#ifdef CHIMERA
++    if (g_fence_forget)
++        return;
++#endif
+     if (sync_) {
+         glDeleteSync(sync_);
+     }
+diff --git a/vita3k/renderer/src/gl/renderer.cpp b/vita3k/renderer/src/gl/renderer.cpp
+--- a/vita3k/renderer/src/gl/renderer.cpp
++++ b/vita3k/renderer/src/gl/renderer.cpp
+@@ -46,6 +46,8 @@
+ 
+ namespace renderer::gl {
+ 
++static bool make_render_target_objects(GLState &state, GLRenderTarget *render_target);
++
+ GLContext::GLContext()
+     : vertex_stream_ring_buffer(GL_ARRAY_BUFFER, MiB(128))
+     , index_stream_ring_buffer(GL_ELEMENT_ARRAY_BUFFER, MiB(64))
+@@ -55,8 +57,72 @@
+     , fragment_info_uniform_buffer(GL_UNIFORM_BUFFER, MiB(8)) {
+     std::memset(&previous_vert_info, 0, sizeof(shader::RenderVertUniformBlock));
+     std::memset(&previous_frag_info, 0, sizeof(shader::RenderFragUniformBlock));
++#ifdef CHIMERA
++    live_contexts().insert(this);
++#endif
++}
++
++GLContext::~GLContext() {
++#ifdef CHIMERA
++    live_contexts().erase(this);
++#endif
+ }
+ 
++GLRenderTarget::GLRenderTarget() {
++#ifdef CHIMERA
++    live_render_targets().insert(this);
++#endif
++}
++
++GLRenderTarget::~GLRenderTarget() {
++#ifdef CHIMERA
++    live_render_targets().erase(this);
++#endif
++}
++
++#ifdef CHIMERA
++std::set<GLContext *> &live_contexts() {
++    static std::set<GLContext *> contexts;
++    return contexts;
++}
++
++std::set<GLRenderTarget *> &live_render_targets() {
++    static std::set<GLRenderTarget *> targets;
++    return targets;
++}
++
++void GLContext::chimera_drop() {
++    vertex_array.cleanup();
++    stream_vertex_buffers.cleanup();
++    vertex_stream_ring_buffer.~RingBuffer();
++    index_stream_ring_buffer.~RingBuffer();
++    vertex_uniform_stream_ring_buffer.~RingBuffer();
++    fragment_uniform_stream_ring_buffer.~RingBuffer();
++    vertex_info_uniform_buffer.~RingBuffer();
++    fragment_info_uniform_buffer.~RingBuffer();
++    // names and pointers into what was just dropped
++    last_draw_program = 0;
++    current_framebuffer = 0;
++    current_color_attachment = 0;
++    current_framebuffer_height = 0;
++    vertex_uniform_buffer_storage_ptr = { nullptr, 0 };
++    fragment_uniform_buffer_storage_ptr = { nullptr, 0 };
++}
++
++// as the constructor and create() made them
++void GLContext::chimera_make() {
++    new (&vertex_stream_ring_buffer) RingBuffer(GL_ARRAY_BUFFER, MiB(128));
++    new (&index_stream_ring_buffer) RingBuffer(GL_ELEMENT_ARRAY_BUFFER, MiB(64));
++    new (&vertex_uniform_stream_ring_buffer) RingBuffer(GL_SHADER_STORAGE_BUFFER, MiB(256));
++    new (&fragment_uniform_stream_ring_buffer) RingBuffer(GL_SHADER_STORAGE_BUFFER, MiB(256));
++    new (&vertex_info_uniform_buffer) RingBuffer(GL_UNIFORM_BUFFER, MiB(8));
++    new (&fragment_info_uniform_buffer) RingBuffer(GL_UNIFORM_BUFFER, MiB(8));
++    vertex_array.init(glGenVertexArrays, glDeleteVertexArrays);
++    std::memset(&previous_vert_info, 0, sizeof(shader::RenderVertUniformBlock));
++    std::memset(&previous_frag_info, 0, sizeof(shader::RenderFragUniformBlock));
++}
++#endif
++
+ static GLenum translate_blend_func(SceGxmBlendFunc src) {
+     R_PROFILE(__func__);
+ 
+@@ -257,12 +323,67 @@
+ 
+     shader_version = fmt::format("v{}", shader::CURRENT_VERSION);
+ 
++#ifdef CHIMERA
++    chimera_context = frame->context_id();
++#endif
+     return true;
+ }
+ 
+ void GLState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
+     texture_cache.init(cfg.hashless_texture_cache, texture_folder(), game_id);
++#ifdef CHIMERA
++    chimera_hashless = cfg.hashless_texture_cache;
++    chimera_game_id = game_id;
++#endif
++}
++
++#ifdef CHIMERA
++void GLState::chimera_check_context() {
++    const uint64_t id = frame->context_id();
++    if (id == 0 || id == chimera_context)
++        return;
++    if (chimera_context != 0)
++        chimera_rebuild();
++    chimera_context = id;
++}
++
++// Every GL object this renderer remembers belongs to another context: a
++// state was loaded. First every one is dropped - which deletes only names
++// this machine remembers, before a single new name is made, so a delete can
++// never land on a name the new objects were given - and then they are all
++// made again. Sync objects are forgotten, not deleted (fence.h). What the GPU
++// drew comes back from memory: the core keeps surface sync on, so every scene
++// the GPU finishes is written to the machine's memory, as the Vita's GPU
++// writes to its own, and a state holds every picture.
++void GLState::chimera_rebuild() {
++    LOG_INFO("The GL context moved (a state was loaded): rebuilding every GL object");
++    g_fence_forget = true;
++    program_cache.clear();
++    fragment_shader_cache.clear();
++    vertex_shader_cache.clear();
++    texture_cache.cleanup();
++    surface_cache.cleanup();
++    screen_renderer.destroy();
++    overlay_renderer.destroy();
++    for (GLContext *c : live_contexts())
++        c->chimera_drop();
++    for (GLRenderTarget *rt : live_render_targets()) {
++        rt->maskbuffer.cleanup();
++        rt->masktexture.cleanup();
++        rt->attachments.cleanup();
++    }
++    frame->lost_context();
++    g_fence_forget = false;
++
++    screen_renderer.init(static_assets);
++    overlay_renderer.init(static_assets, vita_fs_path, sys_lang);
++    texture_cache.init(chimera_hashless, texture_folder(), chimera_game_id);
++    for (GLContext *c : live_contexts())
++        c->chimera_make();
++    for (GLRenderTarget *rt : live_render_targets())
++        make_render_target_objects(*this, rt);
+ }
++#endif
+ 
+ bool create(std::unique_ptr<Context> &context) {
+     R_PROFILE(__func__);
+@@ -285,13 +406,18 @@
+     rt = std::make_unique<GLRenderTarget>();
+     GLRenderTarget *render_target = reinterpret_cast<GLRenderTarget *>(rt.get());
+ 
++    render_target->width = static_cast<uint16_t>(params.width * state.res_multiplier);
++    render_target->height = static_cast<uint16_t>(params.height * state.res_multiplier);
++
++    return make_render_target_objects(state, render_target);
++}
++
++// The render target's GL objects, for its size (create, and a rebuild).
++static bool make_render_target_objects(GLState &state, GLRenderTarget *render_target) {
+     if (state.features.use_mask_bit && !render_target->maskbuffer.init(glGenFramebuffers, glDeleteFramebuffers)) {
+         return false;
+     }
+ 
+-    render_target->width = static_cast<uint16_t>(params.width * state.res_multiplier);
+-    render_target->height = static_cast<uint16_t>(params.height * state.res_multiplier);
+-
+     render_target->attachments.init(glGenTextures, glDeleteTextures);
+ 
+     glBindTexture(GL_TEXTURE_2D, render_target->attachments[0]);

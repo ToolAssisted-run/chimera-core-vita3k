@@ -17,7 +17,8 @@ size: about 150k lines without the Qt GUI and Android, 45 blocking wait sites,
   model. The vblank thread on the host clock becomes the frame.
 - GPU: the GL 4.3 core backend, loaded through `FrameHost::get_proc_address`
   (the bridge's seam). `disable-surface-sync` defaults to true, so the machine
-  never reads GPU results.
+  never reads GPU results. (M3 turns surface sync on: it is what lets a state
+  hold the pictures.)
 - Firmware: libc, libSceFt2, libpvf and libfiber are loaded from
   `PSVUPDAT.PUP`, so commercial games need it as project firmware. Homebrew
   built with vitasdk links newlib and needs none.
@@ -47,7 +48,12 @@ Vulkan upstream.
   Speed on homebrew: ThreadTest's 600 frames in 12.6 s native, 13.0 s
   sandboxed (3.5% apart). Speed on a real game still decides whether to go on
   (no game here yet).
-- [ ] M3 GL through the bridge, rebuilt after a state load.
+- [x] M3 GL through the bridge, rebuilt after a state load (2026-10-03):
+  ThreadTest with a state saved and loaded before every frame, and ThreadTest
+  saved at frame 150 and carried on in another process, both print what one
+  native run printed, pictures included. A state is 315 MiB (homebrew, no
+  game yet). Negative control: without surface sync a load loses the
+  pictures.
 - [ ] M4 sound a frame at a time, input (buttons, two sticks, front and rear
   touch, motion), save data in and out.
 - [ ] M5 package, gate, CI.
@@ -233,7 +239,8 @@ Patch 0004 and the guest-only `guest-libc.cpp`:
 ### The gate (2026-10-03)
 
 `waterbox/run-gate.sh`: every test app twice natively and once in the
-sandbox, compared frame by frame, plus the two negative controls. ThreadTest (`tests/apps/ThreadTest`, ours, CC0)
+sandbox, compared frame by frame; ThreadTest's two state legs (M3) against
+the native run; and the three negative controls. ThreadTest (`tests/apps/ThreadTest`, ours, CC0)
 is the scheduler made visible: three workers take turns at a kernel mutex,
 and the picture shows each one's share, the last 96 turns' owners, a square
 on the process clock and a frame-counted background, drawn through GXM with
@@ -244,11 +251,52 @@ Trap: a dot in the work directory's name (`x.work`) makes one of Vita3K's
 path checks throw (boost create_directories, "Invalid argument"); the gate
 names them `<run>-work`.
 
+### States: the GL rebuild, and the pictures in memory (2026-10-03, M3)
+
+run-wbx seals the machine after Init and takes `--rerecord` (a state saved
+and loaded before every frame, one process), `--save-state F` and `--state F`
+(another process carries on). After every load it mints a new GL context id,
+as Chimera's session does (`ce_gl_state_loaded`).
+
+Patch 0005: the GL renderer compares the frame host's context id with the
+one its objects were made in and, when it moved, rebuilds. First every GL
+object it remembers is dropped - the program and shader caches, the texture
+and surface caches, the screen and overlay renderers, each context's vertex
+array and six ring buffers, each render target's attachments, and the frame
+host's framebuffer - deleting only names this machine remembers, before a
+single new name is made, so a delete never lands on a name a new object was
+given (the RPCS3 core's #43 trap). Sync objects are forgotten, not deleted:
+in another process a remembered GLsync is a pointer that driver never made.
+Then everything is made again, in the order the machine's own allocator
+decides. Contexts and render targets are found through live sets their
+constructors and destructors keep.
+
+- Where it asks: the render thread blocks only waiting for a command list,
+  for a sync object, or for the next vblank, and those waits are where a
+  state is saved - so a load wakes it inside its loop. It asks before every
+  command list and before every present. The first version asked at the top
+  of the loop: after a load in another process the thread first finished the
+  present it was waiting to make, with the old context's names, and frame 61
+  read back black.
+- The pictures: Vita3K keeps what the GPU draws on the GPU (surface sync is
+  off upstream), so after a load the surfaces were gone and the display,
+  falling back to memory, showed memory the GPU never wrote. A double-
+  buffered app draws in one frame and flips in the next, so a load before
+  every frame froze ThreadTest's picture for good (101 of 120 frames wrong).
+  With surface sync on, every scene the GPU finishes is written back to the
+  machine's memory, as the Vita's GPU writes to its own: a state then holds
+  every picture, the rebuilt renderer finds them there, and both state legs
+  match native exactly. It costs nothing measurable on homebrew (ThreadTest
+  120 frames in 3.5 s either way) and changes no picture of an unbroken run.
+  The core turns it on for the machine; the setting `no_surface_sync` exists
+  only for the gate's negative control.
+- What it does not cover: Vita3K's GL backend refuses surface sync at a
+  non-integer resolution multiplier, and the core runs at 1x. Speed with
+  surface sync on a real game is unmeasured (M6).
+
 ## Open questions
 
-- SDL stays linked for M0 (threads in the kernel, pads, audio). It goes in M2.
-- FFmpeg is downloaded prebuilt at configure time (ffmpeg-core); M2 builds it
-  from source for both flavours, as the RPCS3 and PPSSPP cores do.
-- Boost's filesystem is built by Vita3K's CMake into the submodule's own tree.
-- curl is fetched at configure time when the system has none (the updater
-  and SceHttp); the core has no network, so it should go.
+- SDL stays linked (threads in the kernel, pads, audio): M4 decides whether
+  input and sound still need it.
+- A game's speed with every guest thread on one host core, and with surface
+  sync on (M6).

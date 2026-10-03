@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
     SetGlThreadHooks(bind_gl, release_gl);
 
     const harness_core c = { Init, GetLoadError, FrameAdvance, GetVideoBgra, GetVideoWidth, GetVideoHeight,
-        GetFrameCount, GetExitedAt, GetMachineTimeNs, GetSwitchCount, GetLogSize, GetLogBuffer };
+        GetFrameCount, GetExitedAt, GetMachineTimeNs, GetSwitchCount, GetLogSize, GetLogBuffer, nullptr, nullptr, nullptr };
     const char *slash = strrchr(app, '/');
     const int rc = harness_run(&c, &o, slash ? slash + 1 : app);
     long last = 0;
