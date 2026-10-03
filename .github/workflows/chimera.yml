@@ -64,7 +64,19 @@ jobs:
         # llvmpipe (Mesa's EGL) is the GPU both flavours draw on here.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 perl curl xz-utils bzip2 mono-complete libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libx11-dev libxext-dev libasound2-dev
+          sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 perl curl xz-utils bzip2 mono-complete libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libx11-dev libxext-dev libasound2-dev gcc-14 g++-14
+
+      - name: Use GCC 14
+        # Vita3K uses libstdc++ 14 (std::ranges::to), and miniBox builds the
+        # guest's libstdc++ for whatever gcc is on PATH: both flavours, and
+        # everything else, get GCC 14 first on PATH.
+        run: |
+          mkdir -p "$HOME/gcc14"
+          for t in gcc:gcc-14 g++:g++-14 cc:gcc-14 c++:g++-14 cpp:cpp-14; do
+            ln -sf "/usr/bin/${t#*:}" "$HOME/gcc14/${t%%:*}"
+          done
+          echo "$HOME/gcc14" >> "$GITHUB_PATH"
+          "$HOME/gcc14/gcc" -dumpfullversion
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
@@ -88,7 +100,7 @@ jobs:
           path: |
             chimera-checkout/extern/chimera-common-minibox/build/meson-linux
             chimera-checkout/extern/chimera-common-minibox/build/meson-cpp
-          key: guest-cpp-${{ runner.os }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/.git') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/meson.build') }}
+          key: guest-cpp-gcc14-${{ runner.os }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/.git') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/meson.build') }}
 
       - name: Build miniBox (host + C++ guest toolchain)
         run: |
@@ -105,7 +117,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/deps
-          key: deps-${{ runner.os }}-${{ hashFiles('waterbox/build-deps.sh', 'waterbox/build-testapps.sh', 'waterbox/guest-toolchain.cmake') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/.git') }}
+          key: deps-gcc14-${{ runner.os }}-${{ hashFiles('waterbox/build-deps.sh', 'waterbox/build-testapps.sh', 'waterbox/guest-toolchain.cmake') }}-${{ hashFiles('chimera-checkout/extern/chimera-common-minibox/.git') }}
 
       - name: Core gate (builds everything and the package)
         # The commit is the core's authoritative version: this build is the one
