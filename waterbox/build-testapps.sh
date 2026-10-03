@@ -60,4 +60,6 @@ done
 # GXM: SDL2's renderer, and our own app that draws its threads' interleaving
 build "$deps/vitasdk-samples/sdl2/redrectangle" redrectangle
 build "$root/tests/apps/ThreadTest" threadtest
+build "$root/tests/apps/InputTest" inputtest
+build "$root/tests/apps/AudioTest" audiotest
 ls "$out"

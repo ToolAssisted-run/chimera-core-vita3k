@@ -4,7 +4,8 @@
 // dispatcher as in the sandbox, and the two flavours differ only by it.
 //
 // The work directory holds what the sandbox would see mounted: rom.name
-// (naming the app) and settings; the app is read where it lies.
+// (naming the app), settings, and savedata (a copy of --savedata-in); the
+// app is read where it lies.
 //
 // usage: vita3k-run-native <app.vpk> --work <dir> [options: see gate-harness.h]
 // SPDX-License-Identifier: MIT
@@ -32,6 +33,14 @@ uint64_t GetMachineTimeNs(void);
 uint64_t GetSwitchCount(void);
 int64_t GetLogSize(void);
 const uint8_t *GetLogBuffer(void);
+void SetAxis(int32_t index, int32_t value);
+int16_t *GetAudio(void);
+int GetAudioSampleCount(void);
+int InputWasRead(void);
+int32_t GetSaveDataFileCount(void);
+const char *GetSaveDataFileName(int32_t i);
+int64_t GetSaveDataFileSize(int32_t i);
+const uint8_t *GetSaveDataFileBuffer(int32_t i);
 // the bridge's host half (gl-host.c)
 int chimera_gl_host_init(char *err, int errlen);
 const char *chimera_gl_host_description(void);
@@ -74,6 +83,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "cannot write the work directory\n");
         return 2;
     }
+    if (o.savedata_in) {
+        const std::string cmd = "cp '" + std::string(o.savedata_in) + "' '" + work + "/savedata'";
+        if (system(cmd.c_str()) != 0) {
+            fprintf(stderr, "cannot copy %s\n", o.savedata_in);
+            return 2;
+        }
+    }
+    harness_absolute(&o);
     char work_abs[PATH_MAX];
     if (!realpath(o.work, work_abs) || chdir(work_abs) != 0) {
         perror(o.work);
@@ -90,7 +107,9 @@ int main(int argc, char **argv) {
     SetGlThreadHooks(bind_gl, release_gl);
 
     const harness_core c = { Init, GetLoadError, FrameAdvance, GetVideoBgra, GetVideoWidth, GetVideoHeight,
-        GetFrameCount, GetExitedAt, GetMachineTimeNs, GetSwitchCount, GetLogSize, GetLogBuffer, nullptr, nullptr, nullptr };
+        GetFrameCount, GetExitedAt, GetMachineTimeNs, GetSwitchCount, GetLogSize, GetLogBuffer, nullptr, nullptr, nullptr,
+        SetAxis, GetAudio, GetAudioSampleCount, InputWasRead, GetSaveDataFileCount, GetSaveDataFileName,
+        GetSaveDataFileSize, GetSaveDataFileBuffer };
     const char *slash = strrchr(app, '/');
     const int rc = harness_run(&c, &o, slash ? slash + 1 : app);
     long last = 0;

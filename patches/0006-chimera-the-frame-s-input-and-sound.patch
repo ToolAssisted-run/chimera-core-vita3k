@@ -1,0 +1,593 @@
+diff --git a/vita3k/app/src/app_init.cpp b/vita3k/app/src/app_init.cpp
+--- a/vita3k/app/src/app_init.cpp
++++ b/vita3k/app/src/app_init.cpp
+@@ -57,6 +57,10 @@
+ #include <util/log.h>
+ #include <util/string_utils.h>
+ 
++#ifdef CHIMERA
++#include <chimera/input.h>
++#endif
++
+ #if USE_DISCORD
+ #include <app/discord.h>
+ #endif
+@@ -92,6 +96,18 @@
+ 
+     std::lock_guard<std::mutex> lock(emuenv.ctrl.mutex);
+ 
++#ifdef CHIMERA
++    // the system dialogs read the frame's pad too (chimera/input.h)
++    {
++        auto &in = chimera::frame_input();
++        in.read = true;
++        buttons = in.buttons_ext;
++        axes[0] = (in.lx - 128) / 127.0f;
++        axes[1] = (in.ly - 128) / 127.0f;
++        axes[2] = (in.rx - 128) / 127.0f;
++        axes[3] = (in.ry - 128) / 127.0f;
++    }
++#else
+     auto &kb = emuenv.ctrl.keyboard_state;
+     buttons |= kb.buttons_ext;
+     axes[0] += kb.axes[0];
+@@ -123,6 +139,8 @@
+         }
+     }
+ 
++#endif
++
+     auto set = [&](uint32_t mask, overlay::pad_button btn) {
+         if (buttons & mask)
+             states[static_cast<size_t>(btn)] = true;
+@@ -633,11 +651,21 @@
+             }
+         },
+         [&emuenv]() -> overlay::overlay_touch_state {
+-            auto &mouse = emuenv.ctrl.overlay_mouse;
+             overlay::overlay_touch_state state;
++#ifdef CHIMERA
++            // the frame's front panel, which covers the screen at twice its
++            // resolution
++            auto &in = chimera::frame_input();
++            in.read = true;
++            state.x = in.touch_x[0] / 2.0f;
++            state.y = in.touch_y[0] / 2.0f;
++            state.pressed = in.touch_down[0];
++#else
++            auto &mouse = emuenv.ctrl.overlay_mouse;
+             state.x = mouse.x.load(std::memory_order_relaxed);
+             state.y = mouse.y.load(std::memory_order_relaxed);
+             state.pressed = mouse.pressed.load(std::memory_order_relaxed);
++#endif
+             return state;
+         });
+ 
+diff --git a/vita3k/audio/include/audio/impl/chimera_audio.h b/vita3k/audio/include/audio/impl/chimera_audio.h
+--- a/vita3k/audio/include/audio/impl/chimera_audio.h
++++ b/vita3k/audio/include/audio/impl/chimera_audio.h
+@@ -16,18 +16,22 @@
+ // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ 
+ // Chimera: sound with no host device. A port plays in machine time - each
+-// keeps the moment its queued sound runs out - so a game that waits on its
+-// audio waits exactly as long on every run. What it plays is kept for the
+-// frontend to take a frame at a time.
++// keeps an exact clock of the sound queued on it - so a game that waits on
++// its audio waits exactly as long on every run. Every port is mixed into one
++// 48 kHz stereo stream, placed at the machine time it plays, and the core
++// takes each frame's share as the frame ends.
+ #pragma once
+ 
+ #include "../state.h"
+ 
++#include <cstddef>
+ #include <cstdint>
+ #include <deque>
+ 
+ class ChimeraAudioAdapter : public AudioAdapter {
+ public:
++    static constexpr uint64_t RATE = 48000;
++
+     explicit ChimeraAudioAdapter(AudioState &audio_state)
+         : AudioAdapter(audio_state) {}
+ 
+@@ -37,15 +41,32 @@
+     void set_volume(AudioOutPort &out_port, float volume) override;
+     int get_rest_sample(AudioOutPort &out_port) override;
+     void wake_all_ports() override;
++
++    // The mix up to machine time `until_ns`, interleaved S16 stereo at RATE,
++    // into `out` (room for `cap` pairs); returns the pairs written. Silence
++    // where nothing played.
++    size_t take(uint64_t until_ns, int16_t *out, size_t cap);
++
++private:
++    // the mix, summed in 32 bits: mix[0], mix[1] are pair `mix_base`
++    std::deque<int32_t> mix;
++    uint64_t mix_base = 0;
+ };
+ 
+ struct ChimeraAudioOutPort : public AudioOutPort {
+     int channels = 2;
+-    // machine time (ns) when everything queued so far has played
+-    uint64_t play_until = 0;
+-    // what was played, interleaved S16 at `freq`, waiting to be taken
+-    std::deque<int16_t> played;
+-    float gain = 1.0f;
++    int rate = 48000;
++    int grain = 0; // samples a buffer
++    // the port's current run of sound: when it began, and how many samples
++    // (at `rate`) have been queued since; a port left to run dry starts a
++    // new run where it is fed again
++    uint64_t origin_ns = 0;
++    uint64_t queued = 0;
++    // the sample before the buffer being placed, per channel (resampling
++    // interpolates towards each sample from the one before)
++    int16_t last[2] = {};
+     // a notify moves it, waking an output waiting out its buffer
+     uint32_t wake_seq = 0;
++
++    uint64_t play_until() const { return origin_ns + queued * 1000000000ull / rate; }
+ };
+diff --git a/vita3k/audio/src/impl/chimera_audio.cpp b/vita3k/audio/src/impl/chimera_audio.cpp
+--- a/vita3k/audio/src/impl/chimera_audio.cpp
++++ b/vita3k/audio/src/impl/chimera_audio.cpp
+@@ -22,52 +22,94 @@
+ #include <algorithm>
+ #include <cstring>
+ 
+-// at most this much unread sound is kept (a frontend that never takes it
+-// must not grow the machine without bound): one second at 48 kHz stereo
+-static constexpr size_t MAX_KEPT_SAMPLES = 48000 * 2;
++// the pair of the mix that plays at machine time `ns`
++static uint64_t pair_at(uint64_t ns) {
++    return ns <= VSCHED_START_NS ? 0 : (ns - VSCHED_START_NS) * ChimeraAudioAdapter::RATE / 1000000000ull;
++}
+ 
+ AudioOutPortPtr ChimeraAudioAdapter::open_port(int nb_channels, int freq, int nb_sample) {
+     auto port = std::make_shared<ChimeraAudioOutPort>();
+     port->channels = nb_channels;
+-    port->play_until = vsched_now_ns();
++    port->rate = freq > 0 ? freq : 48000;
++    port->grain = nb_sample;
++    port->len_bytes = nb_sample * nb_channels * static_cast<int>(sizeof(int16_t));
++    port->len_microseconds = static_cast<uint64_t>(nb_sample) * 1000000ull / port->rate;
++    port->origin_ns = vsched_now_ns();
+     return port;
+ }
+ 
+ // The hardware double-buffers: an output returns once the buffer before it
+-// has started playing, that is when no more than one buffer is queued.
++// has started playing, that is when no more than one buffer is queued. The
++// buffer is mixed in at the moment it will play.
+ void ChimeraAudioAdapter::audio_output(AudioOutPort &out_port, const void *buffer) {
+     auto &port = static_cast<ChimeraAudioOutPort &>(out_port);
+-    const uint64_t buffer_ns = port.len_microseconds * 1000;
++    const uint64_t buffer_ns = static_cast<uint64_t>(port.grain) * 1000000000ull / port.rate;
+     for (;;) {
+         if (port.stopping)
+             return;
+         const uint64_t now = vsched_now_ns();
+-        if (port.play_until <= now + buffer_ns)
++        if (port.play_until() <= now + buffer_ns)
+             break;
+         const vsched_wait_item item = { &port.wake_seq, port.wake_seq };
+-        vsched_wait_until(&item, 1, port.play_until - buffer_ns);
++        vsched_wait_until(&item, 1, port.play_until() - buffer_ns);
+     }
+     const uint64_t now = vsched_now_ns();
+-    port.play_until = std::max(port.play_until, now) + buffer_ns;
++    if (port.play_until() < now) {
++        // it ran dry: a new run starts now
++        port.origin_ns = now;
++        port.queued = 0;
++        port.last[0] = port.last[1] = 0;
++    }
++
++    // the pairs of the mix this buffer covers
++    const uint64_t origin = pair_at(port.origin_ns);
++    const uint64_t first = origin + port.queued * RATE / port.rate;
++    const uint64_t end = origin + (port.queued + port.grain) * RATE / port.rate;
++    if (end > mix_base + mix.size() / 2)
++        mix.resize((end - mix_base) * 2, 0);
+ 
+-    const size_t samples = static_cast<size_t>(port.len_bytes) / sizeof(int16_t);
+     const int16_t *in = static_cast<const int16_t *>(buffer);
+-    for (size_t i = 0; i < samples; i++)
+-        port.played.push_back(static_cast<int16_t>(std::clamp(static_cast<int>(in[i] * port.gain), -32768, 32767)));
+-    while (port.played.size() > MAX_KEPT_SAMPLES)
+-        port.played.pop_front();
++    const int gain[2] = { std::clamp(out_port.left_channel_volume, 0, SCE_AUDIO_VOLUME_0DB),
++        std::clamp(out_port.right_channel_volume, 0, SCE_AUDIO_VOLUME_0DB) };
++    const auto sample = [&](int64_t i, int ch) -> int32_t {
++        const int c = port.channels == 2 ? ch : 0;
++        return i < 0 ? port.last[c] : in[i * port.channels + c];
++    };
++    for (uint64_t p = std::max(first, mix_base); p < end; p++) {
++        // where pair p falls among this buffer's samples: sample i, and
++        // frac/65536 of the way to the next (in units of 1/RATE of a sample
++        // first; just before the buffer's first sample is i == -1)
++        const int64_t num = static_cast<int64_t>((p - origin) * static_cast<uint64_t>(port.rate)) - static_cast<int64_t>(port.queued * RATE);
++        const int64_t r = static_cast<int64_t>(RATE);
++        const int64_t i = num >= 0 ? num / r : -((-num + r - 1) / r);
++        const int32_t frac = static_cast<int32_t>(((num - i * r) << 16) / r);
++        for (int ch = 0; ch < 2; ch++) {
++            int32_t v;
++            if (port.rate == static_cast<int>(RATE))
++                v = sample(i, ch);
++            else {
++                const int32_t a = sample(i - 1, ch), b = sample(i, ch);
++                v = a + static_cast<int32_t>((static_cast<int64_t>(b - a) * frac) >> 16);
++            }
++            mix[(p - mix_base) * 2 + ch] += static_cast<int32_t>((static_cast<int64_t>(v) * gain[ch]) >> 15);
++        }
++    }
++    port.last[0] = in[(port.grain - 1) * port.channels];
++    port.last[1] = in[(port.grain - 1) * port.channels + (port.channels == 2 ? 1 : 0)];
++    port.queued += port.grain;
+ }
+ 
++// the volume is the port's channel volumes, read as each buffer is mixed
+ void ChimeraAudioAdapter::set_volume(AudioOutPort &out_port, float volume) {
+-    static_cast<ChimeraAudioOutPort &>(out_port).gain = volume;
+ }
+ 
+ int ChimeraAudioAdapter::get_rest_sample(AudioOutPort &out_port) {
+     auto &port = static_cast<ChimeraAudioOutPort &>(out_port);
+     const uint64_t now = vsched_now_ns();
+-    if (port.play_until <= now || port.freq <= 0)
++    const uint64_t until = port.play_until();
++    if (until <= now)
+         return 0;
+-    return static_cast<int>((port.play_until - now) * static_cast<uint64_t>(port.freq) / 1000000000ull);
++    return static_cast<int>((until - now) * static_cast<uint64_t>(port.rate) / 1000000000ull);
+ }
+ 
+ void ChimeraAudioAdapter::wake_all_ports() {
+@@ -77,3 +119,17 @@
+         vsched_notify(&port.wake_seq, 1);
+     }
+ }
++
++size_t ChimeraAudioAdapter::take(uint64_t until_ns, int16_t *out, size_t cap) {
++    const uint64_t end = pair_at(until_ns);
++    if (end <= mix_base)
++        return 0;
++    const size_t n = static_cast<size_t>(std::min<uint64_t>(end - mix_base, cap));
++    const size_t have = std::min(n, mix.size() / 2);
++    for (size_t i = 0; i < have * 2; i++)
++        out[i] = static_cast<int16_t>(std::clamp(mix[i], -32768, 32767));
++    std::memset(out + have * 2, 0, (n - have) * 2 * sizeof(int16_t));
++    mix.erase(mix.begin(), mix.begin() + have * 2);
++    mix_base += n;
++    return n;
++}
+diff --git a/vita3k/chimera/CMakeLists.txt b/vita3k/chimera/CMakeLists.txt
+--- a/vita3k/chimera/CMakeLists.txt
++++ b/vita3k/chimera/CMakeLists.txt
+@@ -1,9 +1,12 @@
+-# Chimera: the machine's own scheduler and clock (vsched), and the C++ sync
+-# types the emulator uses in place of the host's. Built only with
+-# CHIMERA_HEADLESS; everything that links util sees CHIMERA defined.
++# Chimera: the machine's own scheduler and clock (vsched), the C++ sync
++# types the emulator uses in place of the host's, and the frame's input.
++# Built only with CHIMERA_HEADLESS; everything that links util sees CHIMERA
++# defined.
+ add_library(chimera STATIC
++	include/chimera/input.h
+ 	include/chimera/sync.h
+ 	include/chimera/vsched.h
++	src/input.cpp
+ 	src/vsched.cpp
+ )
+ target_include_directories(chimera PUBLIC include)
+diff --git a/vita3k/chimera/include/chimera/input.h b/vita3k/chimera/include/chimera/input.h
+new file mode 100644
+--- /dev/null
++++ b/vita3k/chimera/include/chimera/input.h
+@@ -0,0 +1,26 @@
++// Chimera: the frame's input. The core sets it before each frame, in the
++// Vita's own units, and everything the machine reads input from - the pad,
++// both touch panels, the motion sensors, the system dialogs - reads it here,
++// so a frame sees exactly the input it was given and nothing of the host.
++#pragma once
++
++#include <cstdint>
++
++namespace chimera {
++
++struct FrameInput {
++    uint32_t buttons = 0; // SCE_CTRL_* as sceCtrlPeekBufferPositive reports them
++    uint32_t buttons_ext = 0; // the same as the 2/Ext2 reads report them (L1/R1)
++    uint8_t lx = 128, ly = 128, rx = 128, ry = 128; // 0..255, 128 centred
++    // per panel (0 front, 1 rear): a finger, where, in the panel's units
++    bool touch_down[2] = {};
++    uint16_t touch_x[2] = {}, touch_y[2] = {};
++    float accel[3] = { 0.0f, 0.0f, -1.0f }; // g; lying face up reads -1 on z
++    float gyro[3] = {}; // revolutions a second (Vita3K's unit)
++    // set when the machine reads any of it during the frame
++    bool read = false;
++};
++
++FrameInput &frame_input();
++
++} // namespace chimera
+diff --git a/vita3k/chimera/src/input.cpp b/vita3k/chimera/src/input.cpp
+new file mode 100644
+--- /dev/null
++++ b/vita3k/chimera/src/input.cpp
+@@ -0,0 +1,11 @@
++// Chimera: the frame's input (input.h).
++#include <chimera/input.h>
++
++namespace chimera {
++
++FrameInput &frame_input() {
++    static FrameInput input;
++    return input;
++}
++
++} // namespace chimera
+diff --git a/vita3k/ctrl/src/ctrl.cpp b/vita3k/ctrl/src/ctrl.cpp
+--- a/vita3k/ctrl/src/ctrl.cpp
++++ b/vita3k/ctrl/src/ctrl.cpp
+@@ -26,6 +26,10 @@
+ #include <kernel/state.h>
+ #include <util/log.h>
+ 
++#ifdef CHIMERA
++#include <chimera/input.h>
++#endif
++
+ static int reserve_port(CtrlState &state) {
+     for (int i = 0; i < SCE_CTRL_MAX_WIRELESS_NUM; i++) {
+         if (state.free_ports[i]) {
+@@ -261,6 +265,28 @@
+         return;
+     }
+ 
++#ifdef CHIMERA
++    // the frame's pad (chimera/input.h), on port 1 only: no host keyboard or
++    // gamepad reaches the machine
++    {
++        auto &in = chimera::frame_input();
++        in.read = true;
++        const bool digital = (from_ext_function ? state.input_mode_ext : state.input_mode) == SCE_CTRL_MODE_DIGITAL;
++        if (port == 1) {
++            buttons = is_v2 ? in.buttons_ext : in.buttons;
++            lx = digital ? 0x80 : in.lx;
++            ly = digital ? 0x80 : in.ly;
++            rx = digital ? 0x80 : in.rx;
++            ry = digital ? 0x80 : in.ry;
++        } else {
++            lx = ly = rx = ry = 0x80;
++        }
++        if (negative)
++            buttons ^= ~0;
++        return;
++    }
++#endif
++
+     if (emuenv.cfg.current_config.pstv_mode) {
+         if (port == 1) {
+             apply_keyboard(&buttons, axes.data(), is_v2, emuenv);
+diff --git a/vita3k/display/src/display.cpp b/vita3k/display/src/display.cpp
+--- a/vita3k/display/src/display.cpp
++++ b/vita3k/display/src/display.cpp
+@@ -63,9 +63,11 @@
+                         emuenv.renderer->should_display = true;
+             }
+ 
++#ifndef CHIMERA
+             // maybe we should also use a mutex for this part, but it shouldn't be an issue
+             touch_vsync_update(emuenv);
+             refresh_motion(emuenv.motion, emuenv.ctrl);
++#endif // under Chimera the core samples them as each frame starts
+ 
+             // Notify Vblank callback in each VBLANK start
+             for (auto &[_, cb] : display.vblank_callbacks)
+diff --git a/vita3k/modules/SceDriverUser/SceMotion.cpp b/vita3k/modules/SceDriverUser/SceMotion.cpp
+--- a/vita3k/modules/SceDriverUser/SceMotion.cpp
++++ b/vita3k/modules/SceDriverUser/SceMotion.cpp
+@@ -25,6 +25,14 @@
+ #include <util/tracy.h>
+ TRACY_MODULE_NAME(SceMotion);
+ 
++#ifdef CHIMERA
++#include <chimera/input.h>
++// a read of the sensors is a read of the frame's input
++#define CHIMERA_INPUT_READ() (chimera::frame_input().read = true)
++#else
++#define CHIMERA_INPUT_READ()
++#endif
++
+ EXPORT(SceFloat, sceMotionGetAngleThreshold) {
+     TRACY_FUNC(sceMotionGetAngleThreshold);
+     return get_angle_threshold(emuenv.motion);
+@@ -32,6 +40,7 @@
+ 
+ EXPORT(int, sceMotionGetBasicOrientation, SceFVector3 *basicOrientation) {
+     TRACY_FUNC(sceMotionGetBasicOrientation, basicOrientation);
++    CHIMERA_INPUT_READ();
+     if (!emuenv.motion.is_sampling) {
+         return SCE_MOTION_ERROR_NOT_SAMPLING;
+     }
+@@ -73,6 +82,7 @@
+ 
+ EXPORT(int, sceMotionGetSensorState, SceMotionSensorState *sensorState, int numRecords) {
+     TRACY_FUNC(sceMotionGetSensorState, sensorState, numRecords);
++    CHIMERA_INPUT_READ();
+     if (!emuenv.motion.is_sampling) {
+         return SCE_MOTION_ERROR_NOT_SAMPLING;
+     }
+@@ -113,6 +123,7 @@
+ 
+ EXPORT(int, sceMotionGetState, SceMotionState *motionState) {
+     TRACY_FUNC(sceMotionGetState, motionState);
++    CHIMERA_INPUT_READ();
+     if (!emuenv.motion.is_sampling) {
+         return SCE_MOTION_ERROR_NOT_SAMPLING;
+     }
+diff --git a/vita3k/motion/include/motion/functions.h b/vita3k/motion/include/motion/functions.h
+--- a/vita3k/motion/include/motion/functions.h
++++ b/vita3k/motion/include/motion/functions.h
+@@ -37,3 +37,6 @@
+ SceFVector3 get_basic_orientation(const MotionState &state);
+ 
+ void refresh_motion(MotionState &state, CtrlState &ctrl_state);
++#ifdef CHIMERA
++void chimera_motion_update(MotionState &state);
++#endif
+diff --git a/vita3k/motion/src/motion.cpp b/vita3k/motion/src/motion.cpp
+--- a/vita3k/motion/src/motion.cpp
++++ b/vita3k/motion/src/motion.cpp
+@@ -27,6 +27,10 @@
+ #include <SDL3/SDL_gamepad.h>
+ #include <numbers>
+ 
++#ifdef CHIMERA
++#include <chimera/input.h>
++#endif
++
+ void set_display_rotation(MotionState &state, int rotation) {
+     state.device_native_rotation = static_cast<DeviceRotation>(rotation);
+ }
+@@ -34,6 +38,11 @@
+ static void detect_device_motion_support(MotionState &state) {
+     state.device_accel_id = 0;
+     state.device_gyro_id = 0;
++#ifdef CHIMERA
++    // the machine's sensors are the frame's input (chimera_motion_update)
++    state.has_device_motion_support = true;
++    return;
++#endif
+ 
+     int num_sensors;
+     auto sensors_id = SDL_GetSensors(&num_sensors);
+@@ -83,6 +92,9 @@
+     has_device_motion_support = false;
+     device_accel_id = 0;
+     device_gyro_id = 0;
++#ifdef CHIMERA
++    detect_device_motion_support(*this);
++#endif
+ }
+ 
+ void MotionState::clear_device_motion_support() {
+@@ -108,6 +120,9 @@
+ 
+ void MotionState::start_sensor_sampling() {
+     is_sampling = true;
++#ifdef CHIMERA
++    return; // no host sensor is opened
++#endif
+     if (!has_device_motion_support)
+         return;
+ 
+@@ -265,6 +280,22 @@
+     handle_motion_event<SDL_GamepadSensorEvent>(emuenv, sensor_type, sensor);
+ }
+ 
++#ifdef CHIMERA
++// The frame's sensors (chimera/input.h), taken as the frame starts; the core
++// then calls refresh_motion, which integrates the orientation over the frame
++// before.
++void chimera_motion_update(MotionState &state) {
++    if (!state.is_sampling)
++        return;
++    const auto &in = chimera::frame_input();
++    const uint64_t now = std::chrono::duration_cast<std::chrono::microseconds>(machine::clock::now().time_since_epoch()).count();
++    state.motion_data.SetAcceleration({ in.accel[0], in.accel[1], in.accel[2] });
++    state.motion_data.SetGyroscope({ in.gyro[0], in.gyro[1], in.gyro[2] });
++    state.last_updated_accel_timestamp = now;
++    state.last_updated_gyro_timestamp = now;
++}
++#endif
++
+ void refresh_motion(MotionState &state, CtrlState &ctrl_state) {
+     if (!state.is_sampling)
+         return;
+diff --git a/vita3k/motion/src/motion_input.cpp b/vita3k/motion/src/motion_input.cpp
+--- a/vita3k/motion/src/motion_input.cpp
++++ b/vita3k/motion/src/motion_input.cpp
+@@ -48,10 +48,16 @@
+         gyro_bias = (gyro_bias * 0.9999f) + (gyroscope * 0.0001f);
+     }
+ 
++#ifdef CHIMERA
++    // The machine has a gyroscope, and at rest it reads zero: nothing is made
++    // up from the accelerometer (which a host device without one needs).
++    only_accelerometer = false;
++#else
+     // Enable gyro compensation if gyro is active
+     if (gyro.Length2() > 0) {
+         only_accelerometer = false;
+     }
++#endif
+ }
+ 
+ void MotionInput::SetQuaternion(const Util::Quaternion<SceFloat> &quaternion) {
+diff --git a/vita3k/touch/src/touch.cpp b/vita3k/touch/src/touch.cpp
+--- a/vita3k/touch/src/touch.cpp
++++ b/vita3k/touch/src/touch.cpp
+@@ -30,6 +30,10 @@
+ 
+ #include <cstring>
+ 
++#ifdef CHIMERA
++#include <chimera/input.h>
++#endif
++
+ void set_rear_touchscreen(TouchState &state, bool is_back) {
+     state.touchscreen_port = static_cast<SceTouchPortType>(is_back);
+ }
+@@ -95,6 +99,38 @@
+     machine::clock::time_point ts = machine::clock::now();
+     uint64_t timestamp = std::chrono::duration_cast<std::chrono::microseconds>(ts.time_since_epoch()).count();
+ 
++#ifdef CHIMERA
++    // The frame's touches (chimera/input.h), a finger a panel. The core
++    // calls this as each frame starts rather than at the vblank inside it,
++    // so the whole frame reads the frame's own input.
++    {
++        const auto &in = chimera::frame_input();
++        SceTouchData *buffers = touch.touch_buffers[(touch.touch_buffer_idx + 1) % MAX_TOUCH_BUFFER_SAVED];
++        for (int port = 0; port < 2; port++) {
++            SceTouchData *data = &buffers[port];
++            memset(data, 0, sizeof(SceTouchData));
++            data->timeStamp = timestamp;
++            if (!in.touch_down[port]) {
++                touch.is_touched[port] = false;
++                continue;
++            }
++            if (!touch.is_touched[port]) {
++                // a new finger: ids run 0..127
++                touch.curr_touch_id[port] = (touch.curr_touch_id[port] + 1) % 128;
++                touch.is_touched[port] = true;
++            }
++            if (touch.touch_mode[port]) {
++                data->report[0].x = in.touch_x[port];
++                data->report[0].y = in.touch_y[port];
++                data->report[0].id = static_cast<uint8_t>(touch.curr_touch_id[port]);
++                data->reportNum = 1;
++            }
++        }
++        touch.touch_buffer_idx = (touch.touch_buffer_idx + 1) % MAX_TOUCH_BUFFER_SAVED;
++        return;
++    }
++#endif
++
+     // disable mouse support on android because the touchscreen is considered as a mouse, and this creates a mess
+ #ifdef __ANDROID__
+     constexpr bool on_android = true;
+@@ -309,6 +345,9 @@
+ 
+ int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port, SceTouchData *pData, SceUInt32 count, bool is_peek) {
+     memset(pData, 0, sizeof(SceTouchData) * count);
++#ifdef CHIMERA
++    chimera::frame_input().read = true;
++#endif
+     if (emuenv.drop_inputs || emuenv.ctrl.overlay_input_intercepted.load(std::memory_order_relaxed))
+         return 0;
+ 

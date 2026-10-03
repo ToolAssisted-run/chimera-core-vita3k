@@ -1,8 +1,9 @@
 // The core's exports: what the frontend (and both runners of the gate) call.
 // The same file in both flavours: natively they are called directly, in the
-// sandbox through miniBox. The app is the file named by "rom.name" and the
-// settings are the JSON object in "settings" - mounted files in the sandbox,
-// files in the working directory natively.
+// sandbox through miniBox. The app is the file named by "rom.name", the
+// settings are the JSON object in "settings", and save data to start from is
+// the zip "savedata" when there is one - mounted files in the sandbox, files
+// in the working directory natively.
 // SPDX-License-Identifier: MIT
 #include "vita3k_driver.h"
 #include "memfs.h"
@@ -30,6 +31,7 @@ chimera_vita3k::BridgeFrame g_frame(SCREEN_W, SCREEN_H);
 std::string g_error;
 std::vector<uint8_t> g_video(SCREEN_W * SCREEN_H * 4);
 std::vector<uint8_t> g_log;
+int32_t g_axes[chimera_vita3k::AXES] = { 0, 0, 0, 0, 32768, 32768, 32768, 32768, 0, 0, -1000, 0, 0, 0 };
 
 std::string read_file(const char *name) {
     std::string out;
@@ -102,10 +104,21 @@ ECL_EXPORT int Init(void) {
     options.cpu_mhz = json_number(settings, "cpu_mhz");
     options.rtc_start = json_number(settings, "rtc_start");
     options.no_surface_sync = json_number(settings, "no_surface_sync") != 0;
+    if (FILE *f = fopen("savedata", "rb")) {
+        fclose(f);
+        options.savedata = "savedata";
+    }
     return chimera_vita3k::boot(name, options, g_frame, g_error) ? 1 : 0;
 }
 
-ECL_EXPORT void FrameAdvance(uint64_t /*buttons*/) {
+// An axis of the next frame (the frontend sets every one before each frame).
+ECL_EXPORT void SetAxis(int32_t index, int32_t value) {
+    if (index >= 0 && index < chimera_vita3k::AXES)
+        g_axes[index] = value;
+}
+
+ECL_EXPORT void FrameAdvance(uint64_t buttons) {
+    chimera_vita3k::set_input(buttons, g_axes);
     chimera_vita3k::frame();
     const auto &picture = g_frame.picture();
     if (picture.size() == g_video.size())
@@ -123,11 +136,32 @@ ECL_EXPORT int GetVideoHeight(void) {
 }
 
 ECL_EXPORT int16_t *GetAudio(void) {
-    static int16_t none[2];
-    return none;
+    int pairs;
+    return const_cast<int16_t *>(chimera_vita3k::audio(pairs));
 }
 ECL_EXPORT int GetAudioSampleCount(void) {
-    return 0;
+    int pairs;
+    chimera_vita3k::audio(pairs);
+    return pairs;
+}
+
+ECL_EXPORT int InputWasRead(void) {
+    return chimera_vita3k::input_was_read() ? 1 : 0;
+}
+
+// Save data out (the frontend's Export Save Data, docs/save-data.md): a
+// snapshot of what the machine keeps, then each file by index.
+ECL_EXPORT int32_t GetSaveDataFileCount(void) {
+    return static_cast<int32_t>(chimera_vita3k::savedata_snapshot());
+}
+ECL_EXPORT const char *GetSaveDataFileName(int32_t i) {
+    return chimera_vita3k::savedata_name(static_cast<size_t>(i)).c_str();
+}
+ECL_EXPORT int64_t GetSaveDataFileSize(int32_t i) {
+    return static_cast<int64_t>(chimera_vita3k::savedata_bytes(static_cast<size_t>(i)).size());
+}
+ECL_EXPORT const uint8_t *GetSaveDataFileBuffer(int32_t i) {
+    return chimera_vita3k::savedata_bytes(static_cast<size_t>(i)).data();
 }
 
 ECL_EXPORT uint64_t GetFrameCount(void) {

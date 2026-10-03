@@ -30,6 +30,7 @@ add_executable(vita3k-run-native
 	${W}/driver/bridge_frame.cpp
 	${W}/driver/wbx-entry.cpp
 	${W}/driver/memfs.cpp
+	${W}/driver/savedata.cpp
 	${W}/../build/generated-assets.cpp
 	${GEN}/gl-bridge-guest.cpp
 	${GLHOST}

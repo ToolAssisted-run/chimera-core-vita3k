@@ -14,6 +14,7 @@ add_library(vita3k-guest-core STATIC
 	${W}/driver/bridge_frame.cpp
 	${W}/driver/wbx-entry.cpp
 	${W}/driver/memfs.cpp
+	${W}/driver/savedata.cpp
 	${W}/driver/guest-libc.cpp
 	${W}/../build/generated-assets.cpp
 	${GEN}/gl-bridge-guest.cpp

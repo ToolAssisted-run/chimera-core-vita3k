@@ -14,4 +14,5 @@ builds) and `docs/PLAN.md` (the design and the reasoning behind it).
   and our own, `tests/apps`) into `build/testapps/`.
 - `waterbox/run-gate.sh` runs every test app twice natively and once in the
   sandbox and compares them frame by frame: the machine keeps its own clock,
-  so a run never depends on the host. States are compared the same way.
+  so a run never depends on the host. States, input, sound and save data are
+  checked too, against oracles that predict them.

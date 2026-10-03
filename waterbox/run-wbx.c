@@ -142,6 +142,10 @@ int main(int argc, char **argv)
 	memreader sr = { (const uint8_t *)settings, strlen(settings), 0 };
 	wbx_mount_file(g_host, "settings", mem_reader, (uintptr_t)&sr, false, &r);
 	if (r.error_message[0]) { fprintf(stderr, "mount settings: %s\n", r.error_message); return 1; }
+	if (o.savedata_in) {
+		wbx_mount_file_path(g_host, "savedata", o.savedata_in, &r);
+		if (r.error_message[0]) { fprintf(stderr, "mount savedata: %s\n", r.error_message); return 1; }
+	}
 	wbx_activate_host(g_host, &r);
 
 	/* the GPU bridge, handed over before Init */
@@ -171,6 +175,14 @@ int main(int argc, char **argv)
 		(int64_t (*)(void))proc("GetLogSize"),
 		(const uint8_t *(*)(void))proc("GetLogBuffer"),
 		do_seal, do_save, do_load,
+		(void (*)(int32_t, int32_t))proc("SetAxis"),
+		(int16_t *(*)(void))proc("GetAudio"),
+		(int (*)(void))proc("GetAudioSampleCount"),
+		(int (*)(void))proc("InputWasRead"),
+		(int32_t (*)(void))proc("GetSaveDataFileCount"),
+		(const char *(*)(int32_t))proc("GetSaveDataFileName"),
+		(int64_t (*)(int32_t))proc("GetSaveDataFileSize"),
+		(const uint8_t *(*)(int32_t))proc("GetSaveDataFileBuffer"),
 	};
 	const int rc = harness_run(&c, &o, base);
 	if (getenv("CHIMERA_LIST_FILES"))

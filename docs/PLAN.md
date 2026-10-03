@@ -54,8 +54,16 @@ Vulkan upstream.
   native run printed, pictures included. A state is 315 MiB (homebrew, no
   game yet). Negative control: without surface sync a load loses the
   pictures.
-- [ ] M4 sound a frame at a time, input (buttons, two sticks, front and rear
-  touch, motion), save data in and out.
+- [x] M4 sound a frame at a time, input (buttons, two sticks, front and rear
+  touch, motion), save data in and out (2026-10-03): InputTest reads exactly
+  the input an independent oracle predicts from its script, in all 299
+  frames (both kinds of pad read, both sticks, both panels with their touch
+  ids, the accelerometer, the gyroscope); AudioTest's two ports come out as
+  played (left: 1000 Hz at 8000.0 and 250 Hz at 3998.8; right: 250 Hz at
+  1999.4, at half volume), 800 pairs a frame; save data exports and comes
+  back in. All of it native == sandbox, and under a load every frame.
+  Negative controls: the script one frame late, and one sample taken out of
+  the sound, both fail their oracles.
 - [ ] M5 package, gate, CI.
 - [ ] M6 games.
 
@@ -141,7 +149,9 @@ with none left.
 - Sound: a "Chimera" audio adapter with no host device. A port keeps the
   moment its queued sound runs out, an output waits until no more than one
   buffer is queued (the hardware double-buffers), and the samples are kept
-  for the frontend to take a frame at a time (M4).
+  for the frontend to take a frame at a time (M4). (Found in M4: the adapter
+  never set a port's buffer length, so until then an output neither waited
+  nor kept anything. See the M4 entry.)
 - The picture: no shader-compile notices (they depend on what is cached),
   no asynchronous compiling, no shader cache, no swap interval.
 - Frame f ends 2 us after vblank f (the render thread presents 1 us after
@@ -239,8 +249,13 @@ Patch 0004 and the guest-only `guest-libc.cpp`:
 ### The gate (2026-10-03)
 
 `waterbox/run-gate.sh`: every test app twice natively and once in the
-sandbox, compared frame by frame; ThreadTest's two state legs (M3) against
-the native run; and the three negative controls. ThreadTest (`tests/apps/ThreadTest`, ours, CC0)
+sandbox, compared frame by frame (picture, machine time, each frame's sound
+and whether it read input); ThreadTest's two state legs (M3) against the
+native run; InputTest and AudioTest against oracles that predict what they
+read and play, plain and under a load every frame, and the save data round
+trip (M4); and five negative controls. InputTest (CC0) writes down what it
+reads into ux0:data, which the save data export brings out; AudioTest (CC0)
+plays a known tone on each of two ports. ThreadTest (`tests/apps/ThreadTest`, ours, CC0)
 is the scheduler made visible: three workers take turns at a kernel mutex,
 and the picture shows each one's share, the last 96 turns' owners, a square
 on the process clock and a frame-counted background, drawn through GXM with
@@ -293,6 +308,49 @@ constructors and destructors keep.
 - What it does not cover: Vita3K's GL backend refuses surface sync at a
   non-integer resolution multiplier, and the core runs at 1x. Speed with
   surface sync on a real game is unmeasured (M6).
+
+### The frame's input, sound and save data (2026-10-03, M4)
+
+Patch 0006 and `waterbox/driver` (`set_input`, `savedata.cpp`).
+
+- The controls: Up, Down, Left, Right, Cross, Circle, Square, Triangle, L,
+  R, Start, Select, Front Touch and Rear Touch as buttons; both sticks
+  (-128..127, up and right positive, as the PSP and 3DS cores have them),
+  each touch panel's point (0..65535 across it), the accelerometer
+  (thousandths of a g; lying face up reads -1000 on Z) and the gyroscope
+  (tenths of a degree a second, to +-18000: Vita3K's limit is 5 revolutions
+  a second) as axes. The core turns them into the Vita's units: sticks
+  0..255 centred on 128 (Y down), the front panel 1920x1088 points, the rear
+  1920 across and 108..889 down, L/R as L1/R1 to the 2/Ext2 reads.
+- One place holds the frame's input (`chimera/input.h`). The pad reads it
+  live; the touch panels and motion sensors are sampled as the frame
+  STARTS, by the core, instead of at the vblank inside it - otherwise a
+  frame's touches would reach the game a frame late. The system dialogs
+  Vita3K draws itself (save data, messages) read the same pad and the front
+  panel. No host keyboard, gamepad or sensor reaches the machine.
+- Motion: Vita3K makes gyro readings up from the accelerometer until a
+  device reports a non-zero gyro (for host devices that have none). The
+  machine always has one: at rest it reads zero, so nothing is made up.
+- InputWasRead: set by any read of the pad, a panel, the sensors or a
+  dialog's input.
+- Sound: every port is mixed into one 48 kHz stereo stream, each buffer
+  placed at the machine time it plays. A port keeps an exact clock of the
+  samples queued on it (a run starts again where a port that ran dry is fed),
+  BGM and voice ports at other rates are resampled linearly, and the port's
+  left and right volumes apply; Vita3K's global volume does not (the
+  frontend owns the volume). All integer arithmetic, so both flavours agree
+  to the sample. The core takes the mix up to each frame's end: 800 pairs.
+- Save data lives where the Vita keeps it, in the machine's filesystem:
+  ux0:user/<id>/savedata (the save data system's) and ux0:data (where
+  homebrew keeps its). It goes out as savedata/<TITLE ID>/... and data/...
+  (the frontend's Export Save Data) and comes back in under the same names,
+  from a zip mounted as "savedata", unpacked before the app starts and so
+  before the machine is sealed. A leading ux0:/ and user/<id>/ are taken
+  off, and a bare <TITLE ID>/ folder is a title's save; anything else
+  refuses the zip. The user the save belongs to is made first, as the
+  launch would a moment later.
+- Not covered: the PS TV's controls (L2/R2/L3/R3 and more pads), the PS
+  button, a second finger on a panel, the microphone and the camera.
 
 ## Open questions
 
