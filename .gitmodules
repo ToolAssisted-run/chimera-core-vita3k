@@ -1,0 +1,3 @@
+[submodule "extern/vita3k"]
+	path = extern/vita3k
+	url = https://github.com/Vita3K/Vita3K.git

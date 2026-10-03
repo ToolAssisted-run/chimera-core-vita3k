@@ -1,0 +1,57 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -45,7 +45,7 @@
+ 		set(CMAKE_VISIBILITY_INLINES_HIDDEN 1)
+ 	endif()
+ else()
+-	if((ARCHITECTURE STREQUAL "x86_64") OR APPLE)
++	if(((ARCHITECTURE STREQUAL "x86_64") OR APPLE) AND NOT CHIMERA_HEADLESS)
+ 		option(USE_DISCORD_RICH_PRESENCE "Build Vita3K with Discord Rich Presence" ON)
+ 	endif()
+ 	option(BUILD_APPIMAGE "Build an AppImage." OFF)
+@@ -53,6 +53,11 @@
+ 
+ option(FORCE_BUILD_OPENSSL_MAC OFF)
+ 
++# Chimera: the emulator as a library under a core's own driver - no Qt, no
++# GUI, no Discord, no Vita3K program. CHIMERA_DRIVER_DIR is the driver's
++# CMake directory, built in place of the program.
++option(CHIMERA_HEADLESS "Build the emulator's libraries for a Chimera core" OFF)
++
+ if("${CMAKE_CXX_COMPILER_LAUNCHER}" STREQUAL "")
+ 	find_program(CCACHE_PROGRAM ccache)
+ 	if(CCACHE_PROGRAM)
+diff --git a/vita3k/CMakeLists.txt b/vita3k/CMakeLists.txt
+--- a/vita3k/CMakeLists.txt
++++ b/vita3k/CMakeLists.txt
+@@ -103,7 +103,7 @@
+ 	add_compile_options(-Wformat -Werror=format-security)
+ endif()
+ 
+-if(NOT ANDROID)
++if(NOT ANDROID AND NOT CHIMERA_HEADLESS)
+ 	include(${CMAKE_SOURCE_DIR}/cmake/qt6.cmake)
+ endif()
+ 
+@@ -121,7 +121,7 @@
+ add_subdirectory(features)
+ add_subdirectory(glutil)
+ add_subdirectory(updater)
+-if(NOT ANDROID)
++if(NOT ANDROID AND NOT CHIMERA_HEADLESS)
+ 	add_subdirectory(gui-qt)
+ endif()
+ add_subdirectory(gxm)
+@@ -152,6 +152,11 @@
+ add_subdirectory(packages)
+ add_subdirectory(vkutil)
+ 
++if(CHIMERA_HEADLESS)
++	add_subdirectory(${CHIMERA_DRIVER_DIR} chimera)
++	return()
++endif()
++
+ if(ANDROID)
+ 	add_library(vita3k SHARED
+ 		android/jni/android_state.cpp
