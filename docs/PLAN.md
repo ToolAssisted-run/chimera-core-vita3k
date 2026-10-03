@@ -41,8 +41,12 @@ Vulkan upstream.
   thread switches in 300 frames included, and with every host core busy.
   Negative controls: 1 MHz less CPU changes every ThreadTest picture, another
   start date every rtc picture.
-- [ ] M2 the sandbox build: native == sandbox. Speed on a real game decides
-  whether to go on.
+- [x] M2 the sandbox build (2026-10-03): core.wbx runs all eight test apps
+  in miniBox and its lines equal the native reference's in every frame -
+  pictures, machine time and thread switches (ThreadTest's 77,087 included).
+  Speed on homebrew: ThreadTest's 600 frames in 12.6 s native, 13.0 s
+  sandboxed (3.5% apart). Speed on a real game still decides whether to go on
+  (no game here yet).
 - [ ] M3 GL through the bridge, rebuilt after a state load.
 - [ ] M4 sound a frame at a time, input (buttons, two sticks, front and rear
   touch, motion), save data in and out.
@@ -178,10 +182,58 @@ upstream's include directory. The guest toolchain disables the host's
 pkg-config (SDL found dbus and ibus through it). All of Vita3K compiles for
 the guest.
 
+### One core, two runners (2026-10-03, M2)
+
+`waterbox/driver` is the core, the same objects in both flavours:
+`vita3k_driver` (boot and the frame, moved out of run-native), `bridge_frame`
+(the FrameHost), `wbx-entry` (the exports), the machine's filesystem and the
+built-in assets. run-native calls the exports directly and run-wbx through
+miniBox, both through `gate-harness.h`, so they print the same lines from the
+same loop. The app comes in as the file `rom.name` names, the settings as the
+JSON in `settings`: mounted files in the sandbox, files in the work directory
+natively.
+
+- GL goes through the GPU bridge in BOTH flavours (miniBox's generated
+  wrappers; natively the host half's dispatcher in-process), so both issue
+  the same GL stream. The frame host's get_proc_address is the bridge's
+  lookup, and `gen-gl.sh` takes the install step's assignments to glad's
+  pointers out: Vita3K's glad (1) and the host half's (2) define the same
+  glad_gl* globals, so natively the host half is one relocatable object with
+  only chimera_gl_host_* left global.
+- Natively the GL context is a real EGL context held by one thread at a
+  time: the frame host releases it in prepare_for_render_thread and the
+  render thread binds it in make_current (SetGlThreadHooks). In the sandbox
+  every guest thread is one host thread.
+- Vita3K's static assets (data/, shaders-builtin/, 165 KB) are built into the
+  core (`gen-assets.py`) and grafted into memfs.
+
+### The sandbox, case by case (2026-10-03, M2)
+
+Patch 0004 and the guest-only `guest-libc.cpp`:
+- dynarmic's POSIX exception handler installs a signal stack (sigaltstack,
+  which miniBox does not provide) for fastmem: both flavours build its
+  generic handler instead, swapped into the target from Vita3K's CMake, and
+  the page table does the guest's addressing in both (late_init).
+- Vita3K's write tracking (add_protect) still faults: in the sandbox
+  register_access_violation_handler only keeps the handler, and the
+  GuestFaultHandler export (miniBox calls it on the faulting thread) runs it.
+- The 4 GiB reservation's address hint (16 GiB) is outside miniBox's arena,
+  which refuses it: no hint in the guest.
+- The log is synchronous, with no duplicate filter: spdlog's async worker is
+  a thread outside the machine's scheduler (in the sandbox it never ran) and
+  the filter drops repeats by host seconds - both would make the machine's
+  filesystem depend on the host.
+- uname (Boost.Filesystem asks at start-up): a fixed answer.
+- libstdc++'s file streams write with writev: memfs serves writev and readv.
+- zlib for the guest from psvpfstools' copy: its zRIF code calls zlib
+  without linking it (natively the system's libz fills in).
+- Boost for the guest is built without statx, sendfile and copy_file_range
+  (system calls memfs would never see).
+
 ### The gate (2026-10-03)
 
-`waterbox/run-gate.sh`: every test app twice, compared frame by frame, plus
-the two negative controls. ThreadTest (`tests/apps/ThreadTest`, ours, CC0)
+`waterbox/run-gate.sh`: every test app twice natively and once in the
+sandbox, compared frame by frame, plus the two negative controls. ThreadTest (`tests/apps/ThreadTest`, ours, CC0)
 is the scheduler made visible: three workers take turns at a kernel mutex,
 and the picture shows each one's share, the last 96 turns' owners, a square
 on the process clock and a frame-counted background, drawn through GXM with

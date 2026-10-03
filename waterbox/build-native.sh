@@ -8,6 +8,7 @@ build="$root/build/native"
 
 sh "$here/apply-patches.sh"
 sh "$here/build-deps.sh" native
+sh "$here/gen-gl.sh"
 
 # GCC: clang 20 cannot compile libstdc++ 14's std::ranges::to, which
 # Vita3K's string utilities use (and Boost's bootstrap, run by Vita3K's CMake,

@@ -1,0 +1,103 @@
+diff --git a/external/CMakeLists.txt b/external/CMakeLists.txt
+--- a/external/CMakeLists.txt
++++ b/external/CMakeLists.txt
+@@ -128,6 +128,15 @@
+ set(DYNARMIC_NO_BUNDLED_FMT ON CACHE BOOL "")
+ set(DYNARMIC_FRONTENDS "A32" CACHE STRING "")
+ add_subdirectory(dynarmic)
++if(CHIMERA_HEADLESS)
++	# No fastmem, so no signal handler: dynarmic's generic exception handler
++	# in both flavours of the core (the sandbox delivers no signals, and the
++	# native reference must take the same paths), with the page table doing
++	# the guest's addressing (patch: late_init)
++	get_target_property(DYNARMIC_SOURCES dynarmic SOURCES)
++	list(TRANSFORM DYNARMIC_SOURCES REPLACE "exception_handler_posix\\.cpp$" "exception_handler_generic.cpp")
++	set_target_properties(dynarmic PROPERTIES SOURCES "${DYNARMIC_SOURCES}")
++endif()
+ 
+ if(MSVC)
+ 	if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+diff --git a/vita3k/app/src/app_init.cpp b/vita3k/app/src/app_init.cpp
+--- a/vita3k/app/src/app_init.cpp
++++ b/vita3k/app/src/app_init.cpp
+@@ -561,7 +561,13 @@
+     // the renderer is not using it yet, just storing it for later uses
+     state.renderer->late_init(state.cfg, state.app_path, state.mem);
+ 
++#ifdef CHIMERA
++    // the page table does the guest's addressing: dynarmic has no fastmem in
++    // this core (it would need a signal handler)
++    const bool need_page_table = true;
++#else
+     const bool need_page_table = state.renderer->mapping_method == MappingMethod::PageTable || state.renderer->mapping_method == MappingMethod::NativeBuffer;
++#endif
+     if (!init(state.mem, need_page_table)) {
+         LOG_ERROR("Failed to initialize memory for emulator state!");
+         return false;
+diff --git a/vita3k/mem/src/mem.cpp b/vita3k/mem/src/mem.cpp
+--- a/vita3k/mem/src/mem.cpp
++++ b/vita3k/mem/src/mem.cpp
+@@ -73,7 +73,13 @@
+ 
+     assert(state.host_page_size >= 4096); // Limit imposed by Unicorn.
+ 
++#ifdef CHIMERA_GUEST
++    // the sandbox places the reservation in its own arena: a hint outside it
++    // is refused
++    void *preferred_address = nullptr;
++#else
+     void *preferred_address = reinterpret_cast<void *>(1ULL << 34);
++#endif
+ 
+ #ifdef _WIN32
+     state.memory = Memory(static_cast<uint8_t *>(VirtualAlloc(preferred_address, TOTAL_MEM_SIZE, MEM_RESERVE, PAGE_NOACCESS)), delete_memory);
+@@ -648,6 +654,17 @@
+     return;
+ }
+ 
++#ifdef CHIMERA_GUEST
++// The sandbox delivers no signals: it calls the core's GuestFaultHandler on
++// the faulting thread for a page the guest protected, and that lands here.
++extern "C" bool chimera_mem_access_violation(uint8_t *addr, bool write) {
++    return access_violation_handler && access_violation_handler(addr, write);
++}
++
++static void register_access_violation_handler(const AccessViolationHandler &handler) {
++    access_violation_handler = handler;
++}
++#else
+ static void register_access_violation_handler(const AccessViolationHandler &handler) {
+     access_violation_handler = handler;
+     struct sigaction sa;
+@@ -665,5 +682,6 @@
+     }
+ #endif
+ }
++#endif
+ 
+ #endif
+diff --git a/vita3k/util/src/logging.cpp b/vita3k/util/src/logging.cpp
+--- a/vita3k/util/src/logging.cpp
++++ b/vita3k/util/src/logging.cpp
+@@ -159,6 +159,13 @@
+ }
+ 
+ void rebuild_default_logger() {
++#ifdef CHIMERA
++    // Synchronous, with no duplicate filter: the log lives in the machine's
++    // filesystem, so what it holds, and when, may depend neither on a thread
++    // outside the machine's scheduler nor on the host's clock (the filter
++    // drops repeats by host seconds).
++    auto logger = std::make_shared<spdlog::logger>("vita3k logger", sinks.begin(), sinks.end());
++#else
+     std::call_once(s_async_logging_once, []() {
+         spdlog::init_thread_pool(ASYNC_LOG_QUEUE_SIZE, 1);
+     });
+@@ -172,6 +179,7 @@
+         duplicate_filter,
+         spdlog::thread_pool(),
+         spdlog::async_overflow_policy::overrun_oldest);
++#endif
+     spdlog::set_default_logger(std::move(logger));
+     spdlog::set_pattern(LOG_PATTERN);
+ }

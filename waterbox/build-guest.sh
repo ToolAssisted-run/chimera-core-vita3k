@@ -8,6 +8,7 @@ deps="$root/build/deps"
 
 sh "$here/apply-patches.sh"
 sh "$here/build-deps.sh" guest
+sh "$here/gen-gl.sh"
 
 cmake -S "$root/extern/vita3k" -B "$root/build/guest" -G Ninja \
 	-DCMAKE_TOOLCHAIN_FILE="$here/guest-toolchain.cmake" \

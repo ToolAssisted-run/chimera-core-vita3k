@@ -9,7 +9,10 @@
 #                                 Vita3K opens
 #   build/deps/openssl-guest      OpenSSL (libcrypto: hashes, PKG/PFS keys; libssl links, unused: no network);
 #                                 natively the system's
-#   build/deps/boost-guest        Boost.Filesystem from Vita3K's own Boost;
+#   build/deps/boost-guest        Boost.Filesystem from Vita3K's own Boost,
+#                                 with no statx, sendfile or copy_file_range:
+#                                 they are system calls the machine's
+#                                 filesystem (memfs) would never see;
 #                                 natively Vita3K's CMake builds it
 # Every source is pinned by SHA-256 (or by the submodule).
 set -eu
@@ -85,6 +88,20 @@ if [ ! -f "$out/lib64/libcrypto.a" ] && [ ! -f "$out/lib/libcrypto.a" ]; then
 fi
 echo "openssl-guest: $(ls "$out"/lib*/ 2>/dev/null | grep -E '\.a$' | tr '\n' ' ')"
 
+# ---- zlib, from psvpfstools' copy: its zRIF code calls zlib without linking
+# it (natively the system's libz fills in) ----
+out="$deps/zlib-guest"
+if [ ! -f "$out/lib/libz.a" ]; then
+	bld="$deps/zlib-guest-obj"
+	rm -rf "$bld"; mkdir -p "$bld"
+	cp -r "$root/extern/vita3k/external/psvpfstools/zlib/." "$bld"
+	(cd "$bld" && CC="gcc -specs=$SR/lib/musl-gcc.specs" CFLAGS="$GUEST_CFLAGS" sh ./configure --static --prefix="$out") \
+		> "$bld/configure.log" 2>&1 || { tail -20 "$bld/configure.log"; exit 1; }
+	make -C "$bld" -j"$jobs" libz.a > "$bld/make.log" 2>&1 || { tail -20 "$bld/make.log"; exit 1; }
+	mkdir -p "$out/lib" && cp "$bld/libz.a" "$out/lib/"
+fi
+echo "zlib-guest: $(ls "$out/lib")"
+
 # ---- Boost.Filesystem, from Vita3K's Boost ----
 out="$deps/boost-guest"
 if [ ! -f "$out/lib/libboost_filesystem.a" ]; then
@@ -100,6 +117,8 @@ using gcc : guest : gcc : <compileflags>"-specs=$SR/lib/musl-gcc.specs $GUEST_CF
 JAM
 	(cd "$bld/src" && ./b2 --user-config="$bld/user-config.jam" --build-dir="$bld/obj" --prefix="$out" \
 		toolset=gcc-guest link=static runtime-link=static threading=single variant=release \
+		define=BOOST_FILESYSTEM_DISABLE_STATX define=BOOST_FILESYSTEM_DISABLE_SENDFILE \
+		define=BOOST_FILESYSTEM_DISABLE_COPY_FILE_RANGE \
 		--with-filesystem -j"$jobs" install) > "$bld/b2.log" 2>&1 || { tail -20 "$bld/b2.log"; exit 1; }
 fi
 echo "boost-guest: $(ls "$out/lib" | grep -E '\.a$' | tr '\n' ' ')"

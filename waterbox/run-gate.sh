@@ -1,6 +1,7 @@
 #!/bin/sh
-# The gate: every test app twice through the native reference, frame by
-# frame, and the negative controls that prove the comparison can fail.
+# The gate: every test app twice through the native reference and once in
+# the sandbox, frame by frame, and the negative controls that prove the
+# comparison can fail.
 #
 #   run-gate.sh [-n]    -n: do not build (use build/native and build/testapps)
 #
@@ -10,12 +11,16 @@ set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(dirname "$here")"
 run="$root/build/native/bin/vita3k-run-native"
+wbx="$root/build/wbx/run-wbx"
+core="$root/build/wbx/core.wbx"
 apps="$root/build/testapps"
 work="$root/build/gate"
 
 if [ "${1:-}" != "-n" ]; then
 	sh "$here/build-testapps.sh" >/dev/null || { echo "FAIL the test apps did not build"; exit 1; }
 	sh "$here/build-native.sh" >"$root/build/native-build.log" 2>&1 || { echo "FAIL the native reference did not build (build/native-build.log)"; exit 1; }
+	sh "$here/build-guest.sh" >"$root/build/guest-build.log" 2>&1 || { echo "FAIL the guest did not build (build/guest-build.log)"; exit 1; }
+	sh "$here/build-core.sh" >"$root/build/core-link.log" 2>&1 || { echo "FAIL core.wbx did not link (build/core-link.log)"; exit 1; }
 fi
 mkdir -p "$work"
 unset DISPLAY
@@ -28,6 +33,14 @@ fail() { echo "FAIL $*"; fails=$((fails + 1)); }
 native() {
 	name="$1"; vpk="$2"; frames="$3"; shift 3
 	"$run" "$apps/$vpk" --work "$work/$name-work" --frames "$frames" --timeout 600 --digest-every 10 "$@" \
+		>"$work/$name.out" 2>"$work/$name.err"
+	echo $?
+}
+
+# the same, in the sandbox
+sandboxed() {
+	name="$1"; vpk="$2"; frames="$3"; shift 3
+	"$wbx" "$core" "$apps/$vpk" --work "$work/$name-work" --frames "$frames" --timeout 900 --digest-every 10 "$@" \
 		>"$work/$name.out" 2>"$work/$name.err"
 	echo $?
 }
@@ -46,6 +59,14 @@ twice() {
 		fail "$n: two runs differ - $(diff "$work/$n-a.out" "$work/$n-b.out" | sed -n 2p)"
 	else
 		pass "$n: two runs the same in every frame - $(pictures "$n-a") different pictures, $what; $(tail -1 "$work/$n-a.out" | grep -o 'exited=[0-9]* time_ns=[0-9]* switches=[0-9]*')"
+	fi
+	rw=$(sandboxed "$n-wbx" "$vpk" "$frames")
+	if [ "$rw" != 0 ]; then
+		fail "$n: the sandboxed run failed (exit $rw; build/gate/$n-wbx.err)"
+	elif ! cmp -s "$work/$n-a.out" "$work/$n-wbx.out"; then
+		fail "$n: native and sandbox differ - $(diff "$work/$n-a.out" "$work/$n-wbx.out" | sed -n 2p)"
+	else
+		pass "$n: native == sandbox in every frame"
 	fi
 }
 

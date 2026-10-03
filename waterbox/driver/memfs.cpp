@@ -15,9 +15,14 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #ifndef CHIMERA_GUEST
 #include <dlfcn.h>
+#endif
+
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE 1 // the kernel's value; musl's headers lack it
 #endif
 
 #include <algorithm>
@@ -628,6 +633,39 @@ ssize_t write(int fd, const void *buf, size_t count) {
     return syscall(SYS_write, fd, buf, count);
 }
 
+// libstdc++'s file streams write a buffer and the next piece in one writev
+ssize_t writev(int fd, const struct iovec *iov, int iovcnt) {
+    if (is_ours(fd)) {
+        ssize_t total = 0;
+        for (int i = 0; i < iovcnt; i++) {
+            if (iov[i].iov_len == 0)
+                continue;
+            const ssize_t r = write(fd, iov[i].iov_base, iov[i].iov_len);
+            if (r < 0)
+                return total ? total : r;
+            total += r;
+        }
+        return total;
+    }
+    return syscall(SYS_writev, fd, iov, iovcnt);
+}
+
+ssize_t readv(int fd, const struct iovec *iov, int iovcnt) {
+    if (is_ours(fd)) {
+        ssize_t total = 0;
+        for (int i = 0; i < iovcnt; i++) {
+            const ssize_t r = read(fd, iov[i].iov_base, iov[i].iov_len);
+            if (r < 0)
+                return total ? total : r;
+            total += r;
+            if (static_cast<size_t>(r) < iov[i].iov_len)
+                break;
+        }
+        return total;
+    }
+    return syscall(SYS_readv, fd, iov, iovcnt);
+}
+
 ssize_t pread(int fd, void *buf, size_t count, off_t off) {
     if (is_ours(fd)) {
         std::lock_guard lock(g_lock);
@@ -739,6 +777,8 @@ int fstatat64(int dirfd, const char *path, struct stat64 *st, int flags) {
 }
 #endif
 
+#ifdef STATX_BASIC_STATS
+// (glibc's; the sandbox's musl has no statx, and its Boost is built without)
 int statx(int dirfd, const char *path, int flags, unsigned int mask, struct statx *stx) {
     bool mine = false;
     std::string p;
@@ -769,6 +809,7 @@ int statx(int dirfd, const char *path, int flags, unsigned int mask, struct stat
     (void)mask;
     return static_cast<int>(syscall(SYS_statx, dirfd, path, flags, mask, stx));
 }
+#endif
 
 int faccessat(int dirfd, const char *path, int mode, int flags) {
     bool mine;

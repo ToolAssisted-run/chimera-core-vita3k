@@ -65,4 +65,6 @@
 	__pread64_chk;
 	__readlink_chk;
 	__realpath_chk;
+	writev;
+	readv;
 };
