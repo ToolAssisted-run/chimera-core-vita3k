@@ -195,6 +195,7 @@ int main(int argc, char **argv)
 		(int64_t (*)(int32_t))proc("GetSaveDataFileSize"),
 		(const uint8_t *(*)(int32_t))proc("GetSaveDataFileBuffer"),
 		(void (*)(int))proc("SetRenderingEnabled"),
+		(uint64_t (*)(void))proc("GetYieldCount"),
 	};
 	const int rc = harness_run(&c, &o, base);
 	if (getenv("CHIMERA_LIST_FILES"))

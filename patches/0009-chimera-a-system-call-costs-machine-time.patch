@@ -1,0 +1,240 @@
+diff --git a/vita3k/chimera/include/chimera/vsched.h b/vita3k/chimera/include/chimera/vsched.h
+--- a/vita3k/chimera/include/chimera/vsched.h
++++ b/vita3k/chimera/include/chimera/vsched.h
+@@ -78,6 +78,13 @@
+ void vsched_cpu_charge(uint64_t instructions);
+ uint64_t vsched_cpu_remaining(void);
+ void vsched_cpu_slice_over(void);
++// An HLE call (the emulator's own C++ standing in for the system's code)
++// costs the machine what a system call costs: 1332 instructions, one
++// microsecond at the default rate. Without it a guest that polls a system
++// function in a loop must be run millions of times a second of machine time.
++// The gate's negative control sets it to 0.
++void vsched_hle_call(void);
++void vsched_set_hle_call_instructions(uint64_t instructions);
+ 
+ // Thread-local storage without ELF TLS: every thread owns a slot in
+ // [0, VSCHED_SLOTS) for its whole life (slots are reused after exit).
+@@ -92,6 +99,8 @@
+ int vsched_thread_count(void);
+ uint32_t vsched_current_id(void);
+ uint64_t vsched_switch_count(void);
++// every time a thread offered the machine on (a slice's end, a yield)
++uint64_t vsched_yield_count(void);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/vita3k/chimera/src/vsched.cpp b/vita3k/chimera/src/vsched.cpp
+--- a/vita3k/chimera/src/vsched.cpp
++++ b/vita3k/chimera/src/vsched.cpp
+@@ -19,6 +19,7 @@
+ static const uint64_t DEFAULT_CPU_HZ = 1332000000ull;
+ static const uint64_t CPU_SLICE = 100000;  // instructions before a thread gives way
+ static const uint64_t YIELD_COST_NS = 1000;
++static const uint64_t HLE_CALL_INSTRUCTIONS = 1332;
+ static const size_t THREAD_STACK_BYTES = 8u << 20;
+ 
+ enum state_t {
+@@ -52,6 +53,7 @@
+ static uint32_t g_next_id;
+ static uint64_t g_wait_seq;
+ static uint64_t g_switches;
++static uint64_t g_yields;
+ static int g_count;
+ 
+ // 2013-01-01 00:00:00 UTC until the driver says otherwise
+@@ -60,6 +62,7 @@
+ static uint64_t g_cpu_hz = DEFAULT_CPU_HZ;
+ static uint64_t g_cpu_frac; // nanoseconds * hz not yet charged
+ static uint64_t g_slice_left = CPU_SLICE;
++static uint64_t g_hle_call = HLE_CALL_INSTRUCTIONS;
+ 
+ [[noreturn]] static void die(const char *what) {
+     fprintf(stderr, "vsched: %s (now=%llu ns, threads=%d)\n", what, (unsigned long long)g_now, g_count);
+@@ -99,13 +102,20 @@
+     __asm__ volatile("fldcw %0" : : "m"(t->fcw));
+ }
+ 
+-// Wake every timed waiter whose deadline has passed.
+-static void wake_expired(void) {
++// Wake every timed waiter whose deadline has passed, and say which runs
++// next: the earliest deadline (then the longest wait), as a timer interrupt
++// would have it. Round robin would let the frame's end overtake the render
++// thread woken at vblank, two microseconds before it.
++static vthread *wake_expired(void) {
++    vthread *first = nullptr;
+     for (vthread *t = g_head; t; t = t->next)
+         if (t->state == WAITING && t->deadline <= g_now) {
+             t->state = RUNNABLE;
+             t->timed_out = 1;
++            if (!first || t->deadline < first->deadline || (t->deadline == first->deadline && t->wait_seq < first->wait_seq))
++                first = t;
+         }
++    return first;
+ }
+ 
+ // The next runnable thread after `from` in ring order, or null.
+@@ -120,7 +130,7 @@
+ }
+ 
+ // When nothing is runnable, time jumps to the earliest deadline.
+-static void advance_to_next_deadline(void) {
++static vthread *advance_to_next_deadline(void) {
+     uint64_t best = VSCHED_INFINITE;
+     for (vthread *t = g_head; t; t = t->next)
+         if (t->state == WAITING && t->deadline < best)
+@@ -129,18 +139,42 @@
+         die("every thread is waiting forever");
+     if (best > g_now)
+         g_now = best;
+-    wake_expired();
++    return wake_expired();
++}
++
++// A thread handed the machine (even back to itself) gets a fresh slice, cut
++// short at the next timed waiter's deadline: the waiter then wakes on time
++// instead of a slice late, and a thread running alone is not stopped after
++// every block to look for one.
++static void fresh_slice(void) {
++    g_slice_left = CPU_SLICE;
++    uint64_t next = VSCHED_INFINITE;
++    for (vthread *t = g_head; t; t = t->next)
++        if (t->state == WAITING && t->deadline < next)
++            next = t->deadline;
++    if (next == VSCHED_INFINITE || next <= g_now)
++        return;
++    const uint64_t ns = next - g_now;
++    if (ns >= CPU_SLICE * 1000000000ull / g_cpu_hz)
++        return;
++    // the instructions that bring the clock to the deadline, rounded up
++    const uint64_t need = ns * g_cpu_hz - g_cpu_frac;
++    g_slice_left = (need + 999999999ull) / 1000000000ull;
++    if (g_slice_left == 0)
++        g_slice_left = 1;
+ }
+ 
+ // Hand the machine to `t` and park until scheduled again.
+ static void switch_to(vthread *t) {
+     vthread *self = g_cur;
+-    if (t == self)
++    if (t == self) {
++        fresh_slice();
+         return;
++    }
+     fpu_save(self);
+     g_cur = t;
+     g_switches++;
+-    g_slice_left = CPU_SLICE;
++    fresh_slice();
+     sem_post(&t->sem);
+     while (sem_wait(&self->sem) != 0) {
+     }
+@@ -152,16 +186,16 @@
+ // The current thread is no longer runnable: find who runs next.
+ static void schedule_away(void) {
+     vthread *self = g_cur;
++    vthread *woke = wake_expired();
+     for (;;) {
+-        wake_expired();
+-        vthread *t = next_runnable_after(self);
++        vthread *t = woke ? woke : next_runnable_after(self);
+         if (t) {
+             switch_to(t);
+             return;
+         }
+         if (self->state == RUNNABLE)
+             return; // only we can run: keep running
+-        advance_to_next_deadline();
++        woke = advance_to_next_deadline();
+     }
+ }
+ 
+@@ -247,16 +281,16 @@
+     g_count--;
+     // choose the successor the way schedule_away would, starting after prev
+     vthread *t = nullptr;
++    vthread *woke = wake_expired();
+     for (;;) {
+-        wake_expired();
+-        t = next_runnable_after(prev);
++        t = woke ? woke : next_runnable_after(prev);
+         if (t)
+             break;
+-        advance_to_next_deadline();
++        woke = advance_to_next_deadline();
+     }
+     g_cur = t;
+     g_switches++;
+-    g_slice_left = CPU_SLICE;
++    fresh_slice();
+     sem_post(&t->sem);
+     // the thread struct outlives us until nobody can name it; leak it
+     // deliberately (a few hundred bytes per thread ever created)
+@@ -283,13 +317,14 @@
+ void vsched_yield(uint64_t cost_ns) {
+     if (!g_cur)
+         return; // before the machine exists (static initialisers), a yield is nothing
++    g_yields++;
+     g_now += cost_ns;
+-    wake_expired();
+-    vthread *t = next_runnable_after(g_cur);
++    vthread *woke = wake_expired();
++    vthread *t = woke ? woke : next_runnable_after(g_cur);
+     if (t)
+         switch_to(t);
+     else
+-        g_slice_left = CPU_SLICE;
++        fresh_slice();
+ }
+ 
+ void vsched_yield_default(void) {
+@@ -385,6 +420,14 @@
+     vsched_yield(0);
+ }
+ 
++void vsched_hle_call(void) {
++    vsched_cpu_charge(g_hle_call);
++}
++
++void vsched_set_hle_call_instructions(uint64_t instructions) {
++    g_hle_call = instructions;
++}
++
+ int vsched_slot(void) {
+     return g_cur ? g_cur->slot : 0;
+ }
+@@ -413,3 +456,7 @@
+ uint64_t vsched_switch_count(void) {
+     return g_switches;
+ }
++
++uint64_t vsched_yield_count(void) {
++    return g_yields;
++}
+diff --git a/vita3k/modules/module_parent.cpp b/vita3k/modules/module_parent.cpp
+--- a/vita3k/modules/module_parent.cpp
++++ b/vita3k/modules/module_parent.cpp
+@@ -39,6 +39,10 @@
+ 
+ #include <unordered_set>
+ 
++#ifdef CHIMERA
++#include <chimera/vsched.h>
++#endif
++
+ static constexpr bool LOG_UNK_NIDS_ALWAYS = false;
+ 
+ #define LIBRARY(name) extern const LibraryInitFn import_library_init_##name;
+@@ -150,6 +154,12 @@
+ }
+ 
+ void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread_id) {
++#ifdef CHIMERA
++    // the machine pays for the call as the console pays for a system call
++    // (vsched_hle_call): a game polling one in a loop no longer runs it
++    // millions of times a second of machine time
++    vsched_hle_call();
++#endif
+     // HLE - call our C++ function
+     if (emuenv.kernel.debugger.watch_import_calls) {
+         const std::unordered_set<uint32_t> hle_nid_blacklist = {

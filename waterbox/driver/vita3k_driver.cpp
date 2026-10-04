@@ -86,6 +86,8 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
         vsched_set_cpu_hz(options.cpu_mhz * 1000000ull);
     if (options.rtc_start)
         vsched_set_calendar_start(options.rtc_start);
+    if (options.free_hle_calls)
+        vsched_set_hle_call_instructions(0);
     // a timezone from the host would show in the dates the machine formats
     setenv("TZ", "UTC0", 1);
     tzset();
@@ -330,6 +332,10 @@ uint64_t time_ns() {
 
 uint64_t switches() {
     return vsched_switch_count();
+}
+
+uint64_t yields() {
+    return vsched_yield_count();
 }
 
 bool bus_ready() {

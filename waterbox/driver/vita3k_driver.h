@@ -20,6 +20,9 @@ struct Options {
     // the gate's negative control: the GPU's pictures stay on the GPU, and a
     // state cannot hold them
     bool no_surface_sync = false;
+    // the gate's negative control: an HLE call costs the machine nothing
+    // (vsched_hle_call), as before 2026-10-04
+    bool free_hle_calls = false;
     // a zip of save data to unpack before the machine starts (savedata.h): a
     // path natively, a mounted file's name in the sandbox; empty for none
     std::string savedata;
@@ -71,6 +74,7 @@ uint64_t frames();
 uint64_t exited_at(); // the frame the app exited in, or 0
 uint64_t time_ns();
 uint64_t switches();
+uint64_t yields();
 
 // The machine's memory as an address space, for the frontend's RAM tools:
 // the Vita's 4 GiB, resolved a page at a time. A page the machine has not

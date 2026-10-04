@@ -79,6 +79,9 @@ Vulkan upstream.
   (about 1500 switches a frame); with no network (patch 0008) and miniBox's
   fault handler fixed (below) it reaches its developer's logo and is the
   same native and sandboxed in 600 frames (36 s sandboxed).
+  2026-10-04: a system call costs machine time (patch 0009, below), and
+  Alien Shooter went from 3 frames a second to about 30 on its logos and 18
+  on its main menu (llvmpipe), which it now reaches in 45 s.
 
 ## Decisions
 
@@ -433,6 +436,57 @@ handler on the host's thread pointer and its mprotect was refused
 ("something outside a fault took it"). miniBox 4852e35 (same local branch)
 runs the handler under the base the guest faulted on; a test in the threads
 suite, negative-controlled.
+
+### A system call costs machine time (2026-10-04, M6)
+
+Patch 0009, `vsched_hle_call` (user-decided, 2026-10-04).
+
+- What was slow: Alien Shooter ran at 3 frames a second, on llvmpipe and on
+  the 1060 alike. One of its threads polls a system function in a loop,
+  `while (flag) sceNpCheckCallback();` (ARM code at 0x81006cb4), waiting for
+  a sign-in its callback never reports. Machine time moved only with the
+  instructions the JIT ran, and an HLE call cost none, so one second of
+  machine time took 48 million calls of about 27 instructions each: the CPU
+  was 100% busy in that loop, at a microsecond or more of host time a call.
+  Upstream never sees it: there the poller only keeps a host core busy.
+- The rule: every HLE call (`call_import`) costs 1332 instructions, one
+  microsecond at the machine's rate, about what a system call costs the
+  console. It is charged as instructions, so it counts against the thread's
+  slice too. Charged as time alone (tried), the poller kept 3.7 ms turns and
+  starved the loading thread: the game stopped at its first picture.
+- Measured on llvmpipe: the publishers' logos went from 3 to about 30 frames
+  a second, and the main menu (frame 1290) runs at about 18. Five
+  microseconds a call was faster again (85 and 50), but loading then took
+  longer in machine time; the pictures come in the same order either way.
+- What it costs: every call pays it, a lightweight mutex too, which the
+  console takes in userland in tens of nanoseconds. Alien Shooter's boot
+  makes about 90,000 of those a second, so 18% of its machine time goes to
+  them. Exempting the userland fast paths is open.
+- Found on the way, in the same patch: a thread handed the machine back to
+  itself (no other thread could run) kept an empty slice, so it was stopped
+  after every block to look for another thread - about seven times per HLE
+  call, a quarter of the host's time. A thread handed the machine now gets a
+  fresh slice, cut short at the next timed waiter's deadline; without the
+  cut, a thread sleeping while another spins woke up to 53 us late.
+- And a thread whose deadline passes runs next (the earliest deadline,
+  then the longest wait), as a timer interrupt would have it, not when round
+  robin reaches it. With wake-ups on time this mattered at once: a frame ends
+  2 us after its vblank, and round robin let other threads, then the frame's
+  end, run before the render thread woken at vblank, so about one in seven
+  of ThreadTest's frames had no present of their own and repeated the last
+  picture. The gate's turbo leg caught it: after a turbo window that frame
+  shows the picture from before the window. Now every frame has its
+  vblank's present (ThreadTest: one or two in each of 300 frames; the seven
+  repeated pictures are frames where it did not flip).
+- Gate: HleTest (CHMR00004, tests/apps) times 10000 calls with the
+  machine's own clock: 10038 us, and 37 us with `--free-hle-calls` (the
+  control); the two differ by exactly the 10000 calls and the closing clock
+  read, a microsecond each. Its sleeper, 50 sleeps of 100 us while the main
+  thread spins, ends each at most 2 us late (its own two calls), and the run
+  gives way 234 times. Negative controls: the old slice gives way 306,817
+  times; a fresh slice without the deadline cut wakes the sleeper 53 us late.
+- A machine change: every game's timing moves, so a movie made on an earlier
+  build does not replay on this one (a project pins its core).
 
 ## Open questions
 

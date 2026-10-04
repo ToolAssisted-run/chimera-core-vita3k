@@ -183,6 +183,7 @@ ECL_EXPORT int Init(void) {
     options.cpu_mhz = json_number(settings, "cpu_mhz");
     options.rtc_start = json_number(settings, "rtc_start");
     options.no_surface_sync = json_number(settings, "no_surface_sync") != 0;
+    options.free_hle_calls = json_number(settings, "free_hle_calls") != 0;
     const std::string language = json_string(settings, "language");
     if (!language.empty()) {
         options.language = -1;
@@ -338,6 +339,9 @@ ECL_EXPORT uint64_t GetMachineTimeNs(void) {
 }
 ECL_EXPORT uint64_t GetSwitchCount(void) {
     return chimera_vita3k::switches();
+}
+ECL_EXPORT uint64_t GetYieldCount(void) {
+    return chimera_vita3k::yields();
 }
 
 // Every file in the machine's filesystem with its size, one a line: what a

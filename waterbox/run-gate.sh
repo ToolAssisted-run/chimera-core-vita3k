@@ -173,6 +173,38 @@ else
 	fail "a zip that is not a Vita save was taken (exit $r)"
 fi
 
+# What a system call costs (2026-10-04): every HLE call is 1332 instructions,
+# one microsecond, so a game polling one in a loop does not run it millions
+# of times a second. HleTest times 10000 calls with the machine's own clock;
+# the same run with calls free is the control, and the two differ by exactly
+# the 10000 calls and the closing clock read, a microsecond each. Its second
+# half: a thread sleeping 100 us while the main thread spins wakes on time
+# (a fresh slice stops at the next deadline), and a thread running alone is
+# not stopped after every block (the yield count).
+hle_result() { tr '\n' ' ' <"$work/$1-sd/data/hletest/result.txt" 2>/dev/null; }
+hle_field() { hle_result "$1" | tr ' ' '\n' | grep "^$2=" | cut -d= -f2; }
+rw=$(sandboxed hletest hletest.vpk 120 --savedata-out "$work/hletest-sd")
+rn=$(native hletest-n hletest.vpk 120 --savedata-out "$work/hletest-n-sd")
+rf=$(sandboxed hletest-free hletest.vpk 120 --savedata-out "$work/hletest-free-sd" --free-hle-calls)
+us=$(hle_field hletest us); free_us=$(hle_field hletest-free us); late=$(hle_field hletest max_late_us)
+yields=$(grep -o 'yields=[0-9]*' "$work/hletest.err" | cut -d= -f2)
+if [ "$rw" != 0 ] || [ "$rn" != 0 ] || [ "$rf" != 0 ] || [ -z "$us" ] || [ -z "$free_us" ]; then
+	fail "hletest did not run (exit $rw, $rn, $rf; '$(hle_result hletest)')"
+elif [ $((us - free_us)) != 10001 ]; then
+	fail "an HLE call does not cost 1 us: 10000 calls took $us us, $free_us us free"
+else
+	pass "an HLE call costs the machine 1 us: 10000 calls took $us us, $free_us us when calls are free"
+fi
+if ! cmp -s "$work/hletest.out" "$work/hletest-n.out" || ! diff -r "$work/hletest-sd" "$work/hletest-n-sd" >/dev/null; then
+	fail "hletest: native and sandbox differ"
+elif [ -z "$late" ] || [ "$late" -gt 3 ]; then
+	fail "a sleeping thread woke late while another spun: up to $late us after its 100 us"
+elif [ -z "$yields" ] || [ "$yields" -gt 1000 ]; then
+	fail "a thread running alone gave way $yields times in 120 frames (stopped after every block?)"
+else
+	pass "a 100 us sleep while another thread spins ends at most $late us late (its two calls), and the run gave way $yields times; native == sandbox"
+fi
+
 # States, on the app that draws through the GPU. A load puts the whole machine
 # back, pictures included (surface sync writes them to its memory), and the
 # renderer rebuilds every GL object in the context it finds after the load.

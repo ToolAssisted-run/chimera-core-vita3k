@@ -5,7 +5,7 @@
  * usage: <runner> <app.vpk> --work <dir> [--frames N] [--timeout S]
  *        [--digest-every N] [--screenshot F=PATH]... [--cpu-mhz N] [--rtc-start S]
  *        [--rerecord] [--save-state FILE] [--state FILE]   (states: run-wbx only)
- *        [--no-surface-sync] [--input FILE] [--audio-out FILE]
+ *        [--no-surface-sync] [--free-hle-calls] [--input FILE] [--audio-out FILE]
  *        [--savedata-in ZIP] [--savedata-out DIR] [--language L] [--enter-button B]
  *        [--turbo A:B] [--firmware ID=PATH]...
  *
@@ -55,7 +55,7 @@ struct harness_opts {
 	int timeout;
 	uint64_t digest_every;
 	uint64_t cpu_mhz, rtc_start;
-	int rerecord, no_surface_sync;
+	int rerecord, no_surface_sync, free_hle_calls;
 	const char *save_state, *load_state;
 	const char *input, *audio_out, *savedata_in, *savedata_out;
 	const char *language, *enter_button;
@@ -94,6 +94,8 @@ struct harness_core {
 	int64_t (*savedata_size)(int32_t);
 	const uint8_t *(*savedata_buffer)(int32_t);
 	void (*set_rendering)(int);
+	/* every time a thread offered the machine on (stderr, at the end) */
+	uint64_t (*yields)(void);
 };
 
 static int harness_parse(int argc, char **argv, struct harness_opts *o)
@@ -111,6 +113,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 		else if (!strcmp(a, "--rtc-start") && i + 1 < argc) o->rtc_start = strtoull(argv[++i], NULL, 10);
 		else if (!strcmp(a, "--rerecord")) o->rerecord = 1;
 		else if (!strcmp(a, "--no-surface-sync")) o->no_surface_sync = 1;
+		else if (!strcmp(a, "--free-hle-calls")) o->free_hle_calls = 1;
 		else if (!strcmp(a, "--input") && i + 1 < argc) o->input = argv[++i];
 		else if (!strcmp(a, "--audio-out") && i + 1 < argc) o->audio_out = argv[++i];
 		else if (!strcmp(a, "--savedata-in") && i + 1 < argc) o->savedata_in = argv[++i];
@@ -141,7 +144,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 	if (!o->app || !o->work) {
 		fprintf(stderr, "usage: %s <app.vpk> --work <dir> [--frames N] [--timeout S] [--digest-every N]"
 			" [--screenshot F=PATH]... [--cpu-mhz N] [--rtc-start S] [--rerecord] [--save-state FILE]"
-			" [--state FILE] [--no-surface-sync] [--input FILE] [--audio-out FILE] [--savedata-in ZIP]"
+			" [--state FILE] [--no-surface-sync] [--free-hle-calls] [--input FILE] [--audio-out FILE] [--savedata-in ZIP]"
 			" [--savedata-out DIR] [--language L] [--enter-button B] [--turbo A:B]\n", argv[0]);
 		return 0;
 	}
@@ -223,8 +226,8 @@ static int harness_savedata_out(const struct harness_core *c, const char *dir)
 /* The settings object both flavours read, as the frontend would mount it. */
 static void harness_settings(const struct harness_opts *o, char *buf, size_t n)
 {
-	int k = snprintf(buf, n, "{\"cpu_mhz\": \"%" PRIu64 "\", \"rtc_start\": \"%" PRIu64 "\", \"no_surface_sync\": \"%d\"",
-		o->cpu_mhz, o->rtc_start, o->no_surface_sync);
+	int k = snprintf(buf, n, "{\"cpu_mhz\": \"%" PRIu64 "\", \"rtc_start\": \"%" PRIu64 "\", \"no_surface_sync\": \"%d\", \"free_hle_calls\": \"%d\"",
+		o->cpu_mhz, o->rtc_start, o->no_surface_sync, o->free_hle_calls);
 	if (o->language) k += snprintf(buf + k, n - k, ", \"language\": \"%s\"", o->language);
 	if (o->enter_button) k += snprintf(buf + k, n - k, ", \"enter_button\": \"%s\"", o->enter_button);
 	snprintf(buf + k, n - k, "}");
@@ -388,6 +391,7 @@ static int harness_run(const struct harness_core *c, const struct harness_opts *
 		app_name, c->frame_count(), c->exited_at(), c->time_ns(), c->switches(),
 		harness_fnv1a((const uint8_t *)c->video(), bytes), run_audio, w, h);
 	fflush(stdout);
+	if (c->yields) fprintf(stderr, "yields=%" PRIu64 "\n", c->yields());
 	harness_save_log(c, o);
 	if (o->savedata_out && !harness_savedata_out(c, o->savedata_out)) return 6;
 	if (o->save_state) {

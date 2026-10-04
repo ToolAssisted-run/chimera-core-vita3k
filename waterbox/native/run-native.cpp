@@ -31,6 +31,7 @@ uint64_t GetFrameCount(void);
 uint64_t GetExitedAt(void);
 uint64_t GetMachineTimeNs(void);
 uint64_t GetSwitchCount(void);
+uint64_t GetYieldCount(void);
 int64_t GetLogSize(void);
 const uint8_t *GetLogBuffer(void);
 void SetAxis(int32_t index, int32_t value);
@@ -125,7 +126,7 @@ int main(int argc, char **argv) {
     const harness_core c = { Init, GetLoadError, FrameAdvance, GetVideoBgra, GetVideoWidth, GetVideoHeight,
         GetFrameCount, GetExitedAt, GetMachineTimeNs, GetSwitchCount, GetLogSize, GetLogBuffer, nullptr, nullptr, nullptr,
         SetAxis, GetAudio, GetAudioSampleCount, InputWasRead, GetSaveDataFileCount, GetSaveDataFileName,
-        GetSaveDataFileSize, GetSaveDataFileBuffer, SetRenderingEnabled };
+        GetSaveDataFileSize, GetSaveDataFileBuffer, SetRenderingEnabled, GetYieldCount };
     const char *slash = strrchr(app, '/');
     const int rc = harness_run(&c, &o, slash ? slash + 1 : app);
     long last = 0;
