@@ -241,6 +241,17 @@ if [ -x "$engine" ] && [ -f "$pkg" ]; then
 	else
 		fail "the package in chimera-run (exit $r): $verdict; see build/gate/engine.out"
 	fi
+	# Without the GPU - what a frontend does for a core whose renderer is not
+	# "-hw", and what crashed Chimera on Windows before the renderer setting
+	# existed - the core refuses to start and says why, instead of calling GL
+	# through nothing.
+	"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" >"$work/engine-nogpu.out" 2>&1
+	r=$?
+	if [ "$r" != 0 ] && grep -q "no GPU was handed over" "$work/engine-nogpu.out"; then
+		pass "with no GPU the package refuses to start, and says so (chimera-run exit $r)"
+	else
+		fail "with no GPU the package did not refuse cleanly (exit $r) - $(tail -2 "$work/engine-nogpu.out" | head -1)"
+	fi
 else
 	skip "the package in chimera-run: no $engine or package"
 fi

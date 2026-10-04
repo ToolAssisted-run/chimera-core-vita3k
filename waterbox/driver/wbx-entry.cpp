@@ -128,9 +128,11 @@ ECL_EXPORT const char *GetLoadError(void) {
     return g_error.c_str();
 }
 
-// The GPU bridge: the host's dispatcher, handed over before Init.
+// The GPU bridge: the host's dispatcher, handed over before Init. Vita3K
+// draws with OpenGL and nothing else, so without it there is no machine.
+bool g_bridge = false;
 ECL_EXPORT void SetGpuBridge(uint64_t addr) {
-    chimera_gl_install(reinterpret_cast<chimera_gl_bridge_fn>(static_cast<uintptr_t>(addr)));
+    g_bridge = chimera_gl_install(reinterpret_cast<chimera_gl_bridge_fn>(static_cast<uintptr_t>(addr)));
 }
 
 #ifdef CHIMERA_GUEST
@@ -164,6 +166,19 @@ ECL_EXPORT int Init(void) {
         return 0;
     }
     const std::string settings = read_file("settings");
+    // The renderer: Vita3K's OpenGL one on the machine's GPU is the only one
+    // (it has no software renderer), named "-hw" so a frontend knows to hand
+    // the GPU over.
+    const std::string renderer = json_string(settings, "renderer");
+    if (!renderer.empty() && renderer != "opengl-hw") {
+        g_error = "no such renderer: " + renderer;
+        return 0;
+    }
+    if (!g_bridge) {
+        g_error = "Vita3K draws with OpenGL on the GPU, and no GPU was handed over (the renderer setting is opengl-hw; "
+                  "this machine may have no OpenGL context to give)";
+        return 0;
+    }
     chimera_vita3k::Options options;
     options.cpu_mhz = json_number(settings, "cpu_mhz");
     options.rtc_start = json_number(settings, "rtc_start");

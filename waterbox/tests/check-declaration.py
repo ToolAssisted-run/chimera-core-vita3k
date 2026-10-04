@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The package declares what the core reads: waterbox.config's controls, in
-order, are the ones vita3k_driver.h maps; its firmware ids are the files
+order, are the ones vita3k_driver.h maps; its renderer defaults to an "-hw"
+one, so a frontend hands it the GPU it cannot run without; its firmware ids are the files
 wbx-entry.cpp opens; its language options are wbx-entry.cpp's, in the
 Vita's own order; every setting it declares is one the core or the engine
 reads; and the keybinds name the declared controller and only its controls.
@@ -34,6 +35,12 @@ def main():
     neutral = re.search(r"g_axes\[chimera_vita3k::AXES\] = \{([^}]*)\}", entry).group(1)
     if [int(x) for x in neutral.split(",")] != [a["neutral"] for a in cfg["input"]["axes"]]:
         bad.append("axis neutrals: config %s, core's resting axes {%s}" % ([a["neutral"] for a in cfg["input"]["axes"]], neutral))
+
+    # the GPU: Vita3K draws with OpenGL only, and a frontend hands the GPU over
+    # when the renderer setting's value ends in "-hw" (Chimera's convention)
+    renderer = next((s for s in cfg["settings"] if s["name"] == "renderer"), None)
+    if not renderer or not str(renderer.get("default", "")).endswith("-hw"):
+        bad.append("renderer: no setting whose default ends in -hw, so no frontend hands this core a GPU")
 
     # firmware: the ids the core opens
     opened = re.findall(r'"(PS\w+UPDAT\.PUP)"', entry)
