@@ -1,8 +1,24 @@
 # chimera-core-vita3k
 
 [Vita3K](https://github.com/Vita3K/Vita3K)'s PS Vita emulator as a
-[Chimera](https://github.com/ToolAssisted-run/chimera) core (work in
-progress, chimera#154).
+[Chimera](https://github.com/ToolAssisted-run/chimera) core.
+
+## Using it in Chimera
+
+Chimera includes no cores and downloads none. Download the `.chimeraCore`
+file from this repository's
+[Releases](https://github.com/ToolAssisted-run/chimera-core-vita3k/releases)
+page, or build it, and put it in the `Cores` folder beside `Chimera.exe`.
+File > Core Manager lists what is in that folder. The same file works on
+Linux and on Windows. The core draws on the machine's GPU, and most games
+need the PS Vita system software and font package (`PSVUPDAT.PUP`,
+`PSP2UPDAT.PUP`), which the user provides.
+
+## Building
+
+[docs/BUILDING.md](docs/BUILDING.md) has every step, from a fresh clone to
+the package and the gate (GCC 14 is required), and [AGENTS.md](AGENTS.md) is
+the guide for an AI coding agent. In short:
 
 Layout: `extern/vita3k` (upstream, pinned; clone with `--recursive`),
 `patches/` (the series applied to it), `waterbox/` (the driver and the
