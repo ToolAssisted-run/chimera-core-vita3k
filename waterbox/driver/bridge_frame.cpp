@@ -41,6 +41,14 @@ BridgeFrame::BridgeFrame(int width_, int height_)
     , height(height_) {
 }
 
+bool BridgeFrame::resize(int width_, int height_) {
+    if (fbo != 0 || count != 0)
+        return false;
+    width = width_;
+    height = height_;
+    return true;
+}
+
 void *BridgeFrame::get_proc_address(const char *name) const {
     return chimera_gl_lookup(name);
 }

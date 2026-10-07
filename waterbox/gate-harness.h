@@ -6,6 +6,7 @@
  *        [--digest-every N] [--screenshot F=PATH]... [--cpu-mhz N] [--rtc-start S]
  *        [--rerecord] [--save-state FILE] [--state FILE]   (states: run-wbx only)
  *        [--no-surface-sync] [--free-hle-calls] [--input FILE] [--audio-out FILE]
+ *        [--internal-resolution 1x..4x] [--licence WORK.BIN]
  *        [--savedata-in ZIP] [--savedata-out DIR] [--language L] [--enter-button B]
  *        [--turbo A:B] [--firmware ID=PATH]...
  *
@@ -58,7 +59,9 @@ struct harness_opts {
 	int rerecord, no_surface_sync, free_hle_calls;
 	const char *save_state, *load_state;
 	const char *input, *audio_out, *savedata_in, *savedata_out;
+	const char *licence;
 	const char *language, *enter_button;
+	const char *internal_resolution;
 	int firmware_n;
 	const char *firmware_id[4], *firmware_path[4];
 	uint64_t turbo_from, turbo_to;
@@ -113,10 +116,12 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 		else if (!strcmp(a, "--rtc-start") && i + 1 < argc) o->rtc_start = strtoull(argv[++i], NULL, 10);
 		else if (!strcmp(a, "--rerecord")) o->rerecord = 1;
 		else if (!strcmp(a, "--no-surface-sync")) o->no_surface_sync = 1;
+		else if (!strcmp(a, "--internal-resolution") && i + 1 < argc) o->internal_resolution = argv[++i];
 		else if (!strcmp(a, "--free-hle-calls")) o->free_hle_calls = 1;
 		else if (!strcmp(a, "--input") && i + 1 < argc) o->input = argv[++i];
 		else if (!strcmp(a, "--audio-out") && i + 1 < argc) o->audio_out = argv[++i];
 		else if (!strcmp(a, "--savedata-in") && i + 1 < argc) o->savedata_in = argv[++i];
+		else if (!strcmp(a, "--licence") && i + 1 < argc) o->licence = argv[++i];
 		else if (!strcmp(a, "--savedata-out") && i + 1 < argc) o->savedata_out = argv[++i];
 		else if (!strcmp(a, "--language") && i + 1 < argc) o->language = argv[++i];
 		else if (!strcmp(a, "--firmware") && i + 1 < argc && o->firmware_n < 4) {
@@ -144,7 +149,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 	if (!o->app || !o->work) {
 		fprintf(stderr, "usage: %s <app.vpk> --work <dir> [--frames N] [--timeout S] [--digest-every N]"
 			" [--screenshot F=PATH]... [--cpu-mhz N] [--rtc-start S] [--rerecord] [--save-state FILE]"
-			" [--state FILE] [--no-surface-sync] [--free-hle-calls] [--input FILE] [--audio-out FILE] [--savedata-in ZIP]"
+			" [--state FILE] [--no-surface-sync] [--free-hle-calls] [--internal-resolution 1x..4x] [--input FILE] [--audio-out FILE] [--savedata-in ZIP]"
 			" [--savedata-out DIR] [--language L] [--enter-button B] [--turbo A:B]\n", argv[0]);
 		return 0;
 	}
@@ -169,6 +174,7 @@ static inline void harness_absolute(struct harness_opts *o)
 	o->input = harness_abs(o->input);
 	o->audio_out = harness_abs(o->audio_out);
 	o->savedata_in = harness_abs(o->savedata_in);
+	o->licence = harness_abs(o->licence);
 	o->savedata_out = harness_abs(o->savedata_out);
 	for (int f = 0; f < o->firmware_n; f++)
 		o->firmware_path[f] = harness_abs(o->firmware_path[f]);
@@ -230,6 +236,7 @@ static void harness_settings(const struct harness_opts *o, char *buf, size_t n)
 		o->cpu_mhz, o->rtc_start, o->no_surface_sync, o->free_hle_calls);
 	if (o->language) k += snprintf(buf + k, n - k, ", \"language\": \"%s\"", o->language);
 	if (o->enter_button) k += snprintf(buf + k, n - k, ", \"enter_button\": \"%s\"", o->enter_button);
+	if (o->internal_resolution) k += snprintf(buf + k, n - k, ", \"internal_resolution\": \"%s\"", o->internal_resolution);
 	snprintf(buf + k, n - k, "}");
 }
 
@@ -245,6 +252,7 @@ static void harness_slots(const struct harness_opts *o, const char *game, char *
 {
 	int k = snprintf(buf, n, "{\"game\": [\"%s\"]", game);
 	if (o->savedata_in) k += snprintf(buf + k, n - k, ", \"savedata\": [\"%s\"]", harness_base(o->savedata_in));
+	if (o->licence) k += snprintf(buf + k, n - k, ", \"licence\": [\"%s\"]", harness_base(o->licence));
 	snprintf(buf + k, n - k, "}");
 }
 

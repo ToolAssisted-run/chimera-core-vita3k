@@ -107,6 +107,13 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    if (o.licence) {
+        const std::string cmd = "cp '" + std::string(o.licence) + "' '" + work + "/" + harness_base(o.licence) + "'";
+        if (system(cmd.c_str()) != 0) {
+            fprintf(stderr, "cannot copy %s\n", o.licence);
+            return 2;
+        }
+    }
     harness_absolute(&o);
     char work_abs[PATH_MAX];
     if (!realpath(o.work, work_abs) || chdir(work_abs) != 0) {

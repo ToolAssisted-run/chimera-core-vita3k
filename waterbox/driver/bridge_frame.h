@@ -17,6 +17,11 @@ class BridgeFrame : public renderer::FrameHost {
 public:
     BridgeFrame(int width, int height);
 
+    // Another size, before anything was drawn: the Internal Resolution
+    // setting is read after this object exists. False once the framebuffer
+    // has been made.
+    bool resize(int width, int height);
+
     // Natively the context is a real EGL context held by one thread at a
     // time, and the render thread takes it over from the thread that made
     // the renderer; in the sandbox every guest thread is one host thread and

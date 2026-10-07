@@ -488,6 +488,79 @@ Patch 0009, `vsched_hle_call` (user-decided, 2026-10-04).
 - A machine change: every game's timing moves, so a movie made on an earlier
   build does not replay on this one (a project pins its core).
 
+### Internal Resolution (chimera#200, 2026-10-07)
+
+A setting, `internal_resolution`: 1x, 2x, 3x, 4x. Vita3K's renderer has the
+multiplier already (its OpenGL one takes whole numbers) and its surface sync
+knows about it; what was missing was this side. The driver sets
+`resolution_multiplier` and makes the frame's framebuffer N times 960x544,
+the readback and `GetVideoWidth/Height` follow, and the declaration's
+`video.width/height` are now the most the picture can be (3840x2176) with
+the shape left at 960x544. Touch is in panel units and does not change.
+
+What it does, measured:
+
+- The picture is DRAWN bigger. ResTest (CHMR00005, tests/apps) is slopes -
+  eight lines, a disc, a tilted triangle, four colours, no antialiasing -
+  and a slope's steps are the grid's. At 2x, 3815 of the 2x2 blocks of the
+  picture are more than one colour (finer steps), every other block is the
+  1x picture's colour there, and no colour is new. `tests/check-resolution.py`
+  holds a picture to that, and three stretched pictures fail it: the 1x one
+  with pixels repeated (no finer steps - the control the script runs itself),
+  a bilinear stretch (1187 new colours), another app's picture.
+- The machine, on what is here, does not change: Alien Breed for 1500 frames
+  and Alien Shooter for 300 give the same time, thread switches and sound at
+  2x as at 1x. Both draw sprites; a picture made for 960x544 is only
+  enlarged.
+- It is still a setting of the MACHINE and not of the display (chimera's
+  docs/graphics-settings.md, bin C). Surface sync writes what the GPU
+  finishes back into the Vita's memory at the Vita's size, and at 2x that is
+  every second pixel of the bigger picture, not what a 1x render leaves.
+  Those bytes differ and a game that reads its picture back can tell. Not
+  measured: the harness digests no memory. So it is chosen with the project.
+- States hold the machine, and not the bigger picture. What a state has of
+  a picture is what the machine has: the Vita's 960x544, written to its
+  memory by surface sync. ThreadTest at 2x with a state saved and loaded
+  before every frame is the native 2x run's machine in every frame (time,
+  sound, input), and every picture it shows is 1920x1088 - but not the
+  native run's picture: the frame after a load shows the buffer that was
+  finished BEFORE it, rebuilt from memory and enlarged, where the unbroken
+  run shows the drawn one. The first version of the gate's leg expected the
+  pictures to match and failed; the leg now holds what is true. In use: a
+  seek shows a soft picture for the frame after its load and drawn ones
+  from then on, and a movie played from power-on is drawn throughout. The
+  same cost Dolphin's Internal Resolution has, said in the setting's text.
+  Native == sandbox at 2x in every frame.
+- Cost: the GPU's, with the pixels.
+
+### A game as a package (chimera#203, 2026-10-07)
+
+The Game slot takes a `.pkg`, the form the PlayStation Store sends a game
+in, and a new Licence slot (shown when the game is a `.pkg`) takes the
+game's `work.bin` or `.rif`. A file is a package by its two headers, not its
+name. Vita3K's `install_pkg` wants the licence as a zRIF string and its
+`find_pkg_zrif` looks for the `.rif` in the machine, at
+`ux0:license/<TITLE ID>/<content id>.rif`; the driver puts the project's
+file there, under the package's own content id whatever it was called, and
+asks. Converting it prints the licence as text on stdout: that output is
+thrown away, not logged.
+
+Refused by name: a package with no licence; a licence that is not one; a
+package that does not install (damaged, or another game's licence); a
+package that is not a game (add-on content, a patch, a theme - these belong
+to a game, and nothing here installs them yet).
+
+Proof, and its limit. There is no bought package here. A NoNpDRM dump is
+what a package unpacks to, still encrypted as the console keeps it, plus the
+licence; `tests/make-pkg.py` puts a dump back into the container
+`install_pkg` reads (outer headers, three info blocks, the item table, names
+and data under AES-128-CTR with Vita3K's own key, read from its header) and
+takes the licence out. Alien Shooter packed that way and given its licence
+starts the machine the dump starts: every line of 300 frames, native and
+sandbox. With Alien Breed's licence it installs nothing. What this does NOT
+show is a package as Sony made it - the container here is ours, checked
+only by Vita3K's reader. The reporter has real ones.
+
 ## Open questions
 
 - SDL stays linked (threads in the kernel, pads, audio): M4 decides whether

@@ -20,12 +20,19 @@ struct Options {
     // the gate's negative control: the GPU's pictures stay on the GPU, and a
     // state cannot hold them
     bool no_surface_sync = false;
+    // how many times the Vita's 960x544 the GPU draws at (Vita3K's
+    // resolution multiplier; its OpenGL renderer takes whole numbers)
+    int resolution_scale = 1;
     // the gate's negative control: an HLE call costs the machine nothing
     // (vsched_hle_call), as before 2026-10-04
     bool free_hle_calls = false;
     // a zip of save data to unpack before the machine starts (savedata.h): a
     // path natively, a mounted file's name in the sandbox; empty for none
     std::string savedata;
+    // a package's licence (work.bin): what decrypts a .pkg, and without it a
+    // .pkg is refused. A path natively, a mounted file's name in the sandbox;
+    // empty for none
+    std::string licence;
     // the system software and the font package (.PUP), installed into the
     // machine before the app when present: paths natively, mounted names in
     // the sandbox

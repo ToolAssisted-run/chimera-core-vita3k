@@ -147,7 +147,7 @@ int main(int argc, char **argv)
 		if (r.error_message[0]) { fprintf(stderr, "mount %s: %s\n", o.firmware_id[f], r.error_message); return 1; }
 	}
 	/* the slot map a project mounts, and the save data under its own name */
-	static char slots[8192], savename[1024];
+	static char slots[8192], savename[1024], licname[1024];
 	harness_slots(&o, base, slots, sizeof slots);
 	memreader slr = { (const uint8_t *)slots, strlen(slots), 0 };
 	wbx_mount_file(g_host, "slots", mem_reader, (uintptr_t)&slr, false, &r);
@@ -156,6 +156,11 @@ int main(int argc, char **argv)
 		snprintf(savename, sizeof savename, "/%s", harness_base(o.savedata_in));
 		wbx_mount_file_path(g_host, savename, o.savedata_in, &r);
 		if (r.error_message[0]) { fprintf(stderr, "mount %s: %s\n", savename, r.error_message); return 1; }
+	}
+	if (o.licence) {
+		snprintf(licname, sizeof licname, "/%s", harness_base(o.licence));
+		wbx_mount_file_path(g_host, licname, o.licence, &r);
+		if (r.error_message[0]) { fprintf(stderr, "mount %s: %s\n", licname, r.error_message); return 1; }
 	}
 	wbx_activate_host(g_host, &r);
 

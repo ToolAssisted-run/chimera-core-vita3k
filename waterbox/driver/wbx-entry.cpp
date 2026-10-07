@@ -28,6 +28,9 @@
 namespace {
 
 constexpr int SCREEN_W = 960, SCREEN_H = 544;
+// Internal Resolution: the picture is this many screens wide and high
+constexpr int MAX_SCALE = 4;
+int g_scale = 1;
 
 chimera_vita3k::BridgeFrame g_frame(SCREEN_W, SCREEN_H);
 std::string g_error;
@@ -180,6 +183,23 @@ ECL_EXPORT int Init(void) {
         return 0;
     }
     chimera_vita3k::Options options;
+    // "2x": the GPU draws, and the frontend is handed, 1920x1088. Read before
+    // the first GL call, because the framebuffer is made at this size.
+    const std::string resolution = json_string(settings, "internal_resolution");
+    if (!resolution.empty()) {
+        const int scale = resolution.size() == 2 && resolution[1] == 'x' ? resolution[0] - '0' : 0;
+        if (scale < 1 || scale > MAX_SCALE) {
+            g_error = "no such internal resolution: " + resolution;
+            return 0;
+        }
+        g_scale = scale;
+    }
+    if (!g_frame.resize(SCREEN_W * g_scale, SCREEN_H * g_scale)) {
+        g_error = "the picture's size cannot change once the machine has drawn";
+        return 0;
+    }
+    g_video.assign(static_cast<size_t>(SCREEN_W) * g_scale * SCREEN_H * g_scale * 4, 0);
+    options.resolution_scale = g_scale;
     options.cpu_mhz = json_number(settings, "cpu_mhz");
     options.rtc_start = json_number(settings, "rtc_start");
     options.no_surface_sync = json_number(settings, "no_surface_sync") != 0;
@@ -204,6 +224,7 @@ ECL_EXPORT int Init(void) {
         options.enter_button = enter == "cross" ? 1 : 0;
     }
     options.savedata = mounted(slot_first(slots, "savedata"));
+    options.licence = mounted(slot_first(slots, "licence"));
     for (const char *id : { "PSVUPDAT.PUP", "PSP2UPDAT.PUP" })
         if (FILE *f = fopen(id, "rb")) {
             fclose(f);
@@ -237,10 +258,10 @@ ECL_EXPORT uint32_t *GetVideoBgra(void) {
     return reinterpret_cast<uint32_t *>(g_video.data());
 }
 ECL_EXPORT int GetVideoWidth(void) {
-    return SCREEN_W;
+    return SCREEN_W * g_scale;
 }
 ECL_EXPORT int GetVideoHeight(void) {
-    return SCREEN_H;
+    return SCREEN_H * g_scale;
 }
 
 ECL_EXPORT int16_t *GetAudio(void) {

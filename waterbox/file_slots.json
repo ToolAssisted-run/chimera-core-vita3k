@@ -1,5 +1,5 @@
 {
-  "_comment": "A Vita project is one game, and whatever it already saved. The system software is firmware (the System Software setting says which).",
+  "_comment": "A Vita project is one game, the licence a packaged one needs, and whatever the game already saved. The system software is firmware (the System Software setting says which).",
   "slots": [
     {
       "id": "game",
@@ -8,9 +8,25 @@
       "max": 1,
       "formats": [
         "vpk",
-        "zip"
+        "zip",
+        "pkg"
       ],
-      "help": "The game: a .vpk, or a NoNpDRM dump as a .zip (the game's folder with its sce_sys/package/work.bin). Vita3K installs it into the machine before it starts. Vita3K's compatibility list (vita3k.org/compatibility) says which games work."
+      "help": "The game: a .vpk, a NoNpDRM dump as a .zip (the game's folder with its sce_sys/package/work.bin), or the PlayStation Store's own package, a .pkg, with the game's licence in the Licence slot. Vita3K installs it into the machine before it starts. Vita3K's compatibility list (vita3k.org/compatibility) says which games work."
+    },
+    {
+      "id": "licence",
+      "title": "Licence",
+      "min": 0,
+      "max": 1,
+      "formats": [
+        "bin",
+        "rif"
+      ],
+      "help": "The licence a .pkg game is decrypted with: its work.bin (the 512-byte file a NoNpDRM dump keeps in sce_sys/package), or the console's own .rif for the game. A package is encrypted and installs nothing without it; a .vpk or a .zip dump needs none, because a dump carries its own. It is pinned by hash like the game, and the movie cites it.",
+      "exposedWhen": {
+        "slot": "game",
+        "extension": "pkg"
+      }
     },
     {
       "id": "savedata",

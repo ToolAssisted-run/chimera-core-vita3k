@@ -18,6 +18,9 @@
 #include <mem/functions.h>
 #include <modules/module_parent.h>
 #include <packages/functions.h>
+#include <packages/license.h>
+#include <packages/pkg.h>
+#include <packages/sfo.h>
 #include <motion/functions.h>
 #include <touch/functions.h>
 #include <util/fs.h>
@@ -76,6 +79,88 @@ int64_t machine_seconds() {
 }
 
 } // namespace
+
+// A PlayStation Store package, by what it is and not by what it is called:
+// "\x7fPKG" at the start, "\x7fext" where its extended header is.
+static bool is_package(const std::string &path) {
+    PkgHeader header{};
+    PkgExtHeader ext{};
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f)
+        return false;
+    const bool read = fread(&header, sizeof header, 1, f) == 1 && fread(&ext, sizeof ext, 1, f) == 1;
+    fclose(f);
+    return read && std::memcmp(&header.magic, "\x7fPKG", 4) == 0 && std::memcmp(&ext.magic, "\x7f" "ext", 4) == 0;
+}
+
+// The game as a package (.pkg), the form the PlayStation Store sends it in:
+// Vita3K unpacks it into the machine and decrypts it with its licence, which
+// the project brings as the game's work.bin. Vita3K looks for a package's
+// licence in the machine, at ux0:license/<TITLE ID>/<content id>.rif, so that
+// is where the project's file is put - the name is the package's own content
+// id, whatever the file was called. Only a game is the Game slot's: a package
+// that installs anything else (add-on content, a patch, a theme) says so.
+static bool install_package(EmuEnvState &emuenv, const std::string &app, const std::string &tree, const std::string &host_name,
+    const std::string &licence, std::string &title_id, std::string &error) {
+    if (licence.empty()) {
+        error = host_name + " is a package, and a package is encrypted: put the game's licence (its work.bin) in the Licence slot";
+        return false;
+    }
+    PkgHeader header{};
+    if (FILE *f = fopen(app.c_str(), "rb")) {
+        const bool read = fread(&header, sizeof header, 1, f) == 1;
+        fclose(f);
+        if (!read)
+            header = {};
+    }
+    const std::string content_id(header.content_id, strnlen(header.content_id, sizeof header.content_id));
+    if (content_id.size() < 16) {
+        error = host_name + " names no content: it is not a package Vita3K can install";
+        return false;
+    }
+    // a file of the machine's own, not a graft of the project's: the install
+    // writes the licence there again when it is done
+    std::vector<uint8_t> bytes;
+    if (FILE *f = fopen(licence.c_str(), "rb")) {
+        uint8_t buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, f)) > 0 && bytes.size() < (1u << 20))
+            bytes.insert(bytes.end(), buf, buf + n);
+        fclose(f);
+    }
+    const std::string rif = tree + "/fs/ux0/license/" + content_id.substr(7, 9) + "/" + content_id + ".rif";
+    if (bytes.empty() || !chimera::memfs::mkdirs(rif.substr(0, rif.rfind('/'))) || !chimera::memfs::put(rif, bytes)) {
+        error = "cannot read the licence " + licence;
+        return false;
+    }
+    // The conversion prints the licence, as text, on stdout. That is the one
+    // thing here nobody is to read: it goes nowhere, not even to the log.
+    std::ostringstream unread;
+    std::streambuf *was = std::cout.rdbuf(unread.rdbuf());
+    std::string zrif = find_pkg_zrif(app, emuenv.vita_fs_path);
+    std::cout.rdbuf(was);
+    if (zrif.empty() || !validate_zrif(zrif)) {
+        error = fs::path(licence).filename().string() + " is not a licence: a work.bin is the 512 bytes the console keeps for the game";
+        return false;
+    }
+    std::ostringstream said;
+    was = std::cout.rdbuf(said.rdbuf());
+    const bool installed = install_pkg(app, emuenv, zrif, [](float) {});
+    std::cout.rdbuf(was);
+    if (!said.str().empty())
+        LOG_DEBUG("the install said:\n{}", said.str());
+    if (!installed) {
+        error = host_name + " did not install: the package is damaged, or " + fs::path(licence).filename().string() + " is another game's licence";
+        return false;
+    }
+    if (emuenv.app_info.app_category != "gd") {
+        error = host_name + " is not a game on its own: it installs " + emuenv.app_info.app_title
+            + " (category " + emuenv.app_info.app_category + "), which belongs to a game";
+        return false;
+    }
+    title_id = emuenv.app_info.app_title_id;
+    return true;
+}
 
 bool boot(const std::string &host_name, const Options &options, BridgeFrame &frame, std::string &error) {
     g_frame_host = &frame;
@@ -148,6 +233,7 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     cfg.shader_cache = false;
     cfg.log_level = 3;
     cfg.disable_surface_sync = options.no_surface_sync;
+    cfg.resolution_multiplier = static_cast<float>(options.resolution_scale);
     // the system parameters games read (sceAppUtilSystemParamGetInt)
     cfg.sys_lang = options.language;
     cfg.sys_button = options.enter_button;
@@ -187,7 +273,10 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     // what the install prints (Vita3K's PFS decryption talks on stdout) goes
     // to the machine's log, not to the frontend's output
     std::string title_id;
-    {
+    if (is_package(app)) {
+        if (!install_package(emuenv, app, tree, host_name, options.licence, title_id, error))
+            return false;
+    } else {
         std::ostringstream said;
         std::streambuf *was = std::cout.rdbuf(said.rdbuf());
         for (const auto &content : install_archive(emuenv, app))

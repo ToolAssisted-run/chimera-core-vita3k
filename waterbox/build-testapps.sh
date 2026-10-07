@@ -63,4 +63,5 @@ build "$root/tests/apps/ThreadTest" threadtest
 build "$root/tests/apps/InputTest" inputtest
 build "$root/tests/apps/AudioTest" audiotest
 build "$root/tests/apps/HleTest" hletest
+build "$root/tests/apps/ResTest" restest
 ls "$out"

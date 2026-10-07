@@ -106,6 +106,7 @@ script="$work/inputtest-script.txt"
 python3 "$here/tests/input-oracle.py" gen "$script" 300
 twice inputtest.vpk 300 "every control read once a frame (a black screen)" --input "$script"
 twice audiotest.vpk 300 "two ports, two tones (a black screen)"
+twice restest.vpk 120 "slopes through GXM: eight lines, a disc and a triangle"
 
 # The frame's input: InputTest writes down everything it reads of the pad
 # (both kinds of read), both touch panels and the motion sensors, once a
@@ -260,6 +261,77 @@ else
 	fail "turbo changed the machine (exit $r) - $(diff "$work/threadtest-machine.want" "$work/threadtest-machine.got" | sed -n 2p)"
 fi
 
+# Internal Resolution (chimera#200): the GPU draws at N times the Vita's
+# 960x544 and that picture is the one handed over. ResTest's is slopes, and a
+# slope's steps are the grid's - so a picture DRAWN at 2x has finer steps than
+# the 1x one, which the same picture stretched cannot have, whichever way it
+# is stretched (tests/check-resolution.py, which runs that control on the 1x
+# picture itself). Native and sandbox agree on it frame by frame; states hold
+# through it; a value that is not one of the four is refused.
+r1=$(native restest-1x restest.vpk 120 --screenshot 100="$work/restest-1x.tga")
+r2=$(native restest-2x restest.vpk 120 --internal-resolution 2x --screenshot 100="$work/restest-2x.tga")
+r4=$(native restest-4x restest.vpk 120 --internal-resolution 4x --screenshot 100="$work/restest-4x.tga")
+rw=$(sandboxed restest-2x-wbx restest.vpk 120 --internal-resolution 2x)
+verdict=$(python3 "$here/tests/check-resolution.py" "$work/restest-1x.tga" "$work/restest-2x.tga" 2 2>&1); v2=$?
+verdict4=$(python3 "$here/tests/check-resolution.py" "$work/restest-1x.tga" "$work/restest-4x.tga" 4 2>&1); v4=$?
+if [ "$r1" != 0 ] || [ "$r2" != 0 ] || [ "$r4" != 0 ] || [ "$rw" != 0 ]; then
+	fail "Internal Resolution: a run failed (exit $r1, $r2, $r4, sandbox $rw; build/gate/restest-2x.err)"
+elif [ "$v2" != 0 ] || [ "$v4" != 0 ]; then
+	fail "Internal Resolution: $verdict; $verdict4"
+elif ! tail -1 "$work/restest-2x.out" | grep -q ' 1920x1088$' || ! tail -1 "$work/restest-4x.out" | grep -q ' 3840x2176$'; then
+	fail "Internal Resolution: the picture handed over is $(tail -1 "$work/restest-2x.out" | grep -o '[0-9]*x[0-9]*$') at 2x and $(tail -1 "$work/restest-4x.out" | grep -o '[0-9]*x[0-9]*$') at 4x"
+elif ! cmp -s "$work/restest-2x.out" "$work/restest-2x-wbx.out"; then
+	fail "Internal Resolution: native and sandbox differ at 2x - $(diff "$work/restest-2x.out" "$work/restest-2x-wbx.out" | sed -n 2p)"
+else
+	pass "Internal Resolution 2x is drawn, not stretched: $verdict; 4x: ${verdict4%%:*}; native == sandbox in every frame"
+fi
+# Through states, on the app whose picture moves. What a state holds of a
+# picture is what the machine holds: the Vita's own 960x544, written to its
+# memory by surface sync. So the MACHINE under a state saved and loaded before
+# every frame is the native 2x run's, frame for frame - and the picture shown
+# in the frame after a load may be that 960x544 one enlarged, where the run
+# that never stopped shows the drawn one. Said in the setting's description;
+# held here to what is true of it: the machine, and the picture's size.
+rn=$(native threadtest-2x threadtest.vpk 100 --internal-resolution 2x)
+r=$(sandboxed threadtest-2x-rerecord threadtest.vpk 100 --rerecord --internal-resolution 2x)
+grep '^frame' "$work/threadtest-2x.out" | head -10 | sed 's/ video=[0-9a-f]*//' >"$work/threadtest-2x-rerecord.want"
+grep '^frame' "$work/threadtest-2x-rerecord.out" | sed 's/ video=[0-9a-f]*//' >"$work/threadtest-2x-rerecord.got"
+if [ "$rn" = 0 ] && [ "$r" = 0 ] && [ -s "$work/threadtest-2x-rerecord.want" ] && cmp -s "$work/threadtest-2x-rerecord.want" "$work/threadtest-2x-rerecord.got" \
+	&& tail -1 "$work/threadtest-2x-rerecord.out" | grep -q ' 1920x1088$'; then
+	pass "at 2x, threadtest with a state saved and loaded before every frame is the native 2x run's machine in every frame, its picture 1920x1088"
+else
+	fail "at 2x, threadtest under rerecord is not the native 2x run's machine (exit $rn, $r) - $(diff "$work/threadtest-2x-rerecord.want" "$work/threadtest-2x-rerecord.got" | sed -n 2p)"
+fi
+r=$(native restest-5x restest.vpk 5 --internal-resolution 5x)
+if [ "$r" != 0 ] && grep -q "no such internal resolution: 5x" "$work/restest-5x.err"; then
+	pass "an internal resolution that is not one of the four is refused: $(grep -o 'no such internal resolution: 5x' "$work/restest-5x.err")"
+else
+	fail "an internal resolution of 5x was not refused (exit $r)"
+fi
+
+# A package and its licence (chimera#203), the part that needs no game: a file
+# that IS a package by its two headers, and nothing else. With no licence it
+# is refused by name; with a licence slot holding something that is not one,
+# that is what is said. (The install itself is the games' leg below.)
+python3 - "$work/empty.pkg" "$work/not-a-licence.bin" <<'PKGSTUB'
+import struct, sys
+head = struct.pack(">IHHIIIIQQQ", 0x7F504B47, 0x8000, 2, 0x100, 0, 0x200, 0, 0x200, 0x200, 0)
+head += b"UP0000-CHMR00009_00-0000000000000000".ljust(0x30, b"\0") + bytes(0x60)
+ext = struct.pack(">IIIIIIQIIIIQQ", 0x7F657874, 1, 0x40, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0)
+open(sys.argv[1], "wb").write((head + ext).ljust(0x200, b"\0"))
+open(sys.argv[2], "wb").write(b"This is the wrong file: a licence is 512 bytes of the console's own.\n")
+PKGSTUB
+r=$(native pkg-nolicence "$work/empty.pkg" 5)
+rj=$(native pkg-junklicence "$work/empty.pkg" 5 --licence "$work/not-a-licence.bin")
+rjw=$(sandboxed pkg-junklicence-wbx "$work/empty.pkg" 5 --licence "$work/not-a-licence.bin")
+if [ "$r" != 0 ] && grep -q "is a package, and a package is encrypted: put the game's licence" "$work/pkg-nolicence.err" \
+	&& [ "$rj" != 0 ] && grep -q "not-a-licence.bin is not a licence" "$work/pkg-junklicence.err" \
+	&& [ "$rjw" != 0 ] && grep -q "not-a-licence.bin is not a licence" "$work/pkg-junklicence-wbx.err"; then
+	pass "a package with no licence is refused by name, and so is a licence that is not one (native and sandbox)"
+else
+	fail "a package without a usable licence was not refused cleanly (exit $r, $rj, sandbox $rjw) - $(tail -1 "$work/pkg-nolicence.err")"
+fi
+
 # The package through Chimera's own engine: InputTest driven by a movie of
 # the oracle's script, its record out through the engine's save data export.
 if [ -x "$engine" ] && [ -f "$pkg" ]; then
@@ -283,6 +355,18 @@ if [ -x "$engine" ] && [ -f "$pkg" ]; then
 		pass "with no GPU the package refuses to start, and says so (chimera-run exit $r)"
 	else
 		fail "with no GPU the package did not refuse cleanly (exit $r) - $(tail -2 "$work/engine-nogpu.out" | head -1)"
+	fi
+	# Internal Resolution through the engine: the setting as a project gives
+	# it, the picture as the frontend takes it - bigger than the screen, which
+	# the declaration has to leave room for (video.width and height are 4x).
+	"$engine" "$pkg" "$apps/restest.vpk" "$work/engine.movie" --gpu --settings '{"internal_resolution":"2x"}' \
+		--screenshot 100="$work/engine-2x.tga" >"$work/engine-2x.out" 2>&1
+	r=$?
+	verdict=$(python3 "$here/tests/check-resolution.py" "$work/restest-1x.tga" "$work/engine-2x.tga" 2 2>&1); vr=$?
+	if [ "$r" = 0 ] && [ "$vr" = 0 ]; then
+		pass "Internal Resolution 2x in chimera-run: the frontend is handed the drawn picture - ${verdict%%:*}"
+	else
+		fail "Internal Resolution 2x in chimera-run (exit $r): $verdict; see build/gate/engine-2x.out"
 	fi
 else
 	skip "the package in chimera-run: no $engine or package"
@@ -330,8 +414,48 @@ if [ -f "$game" ] && [ -f "$fonts" ] && [ -f "$sysw" ]; then
 	else
 		fail "Alien Shooter on the system software (exit $rn, $rw; version '$version', $missing missing system files)"
 	fi
+	# The same game as a PACKAGE (chimera#203): the form the PlayStation Store
+	# sends a game in, a .pkg, with the licence in its own slot. There is no
+	# bought package here to install, and there is a dump - which is what a
+	# package unpacks to, still encrypted, plus its licence. tests/make-pkg.py
+	# puts the dump back into the container Vita3K's installer reads and takes
+	# the licence out, so the core does with it what it does with a bought
+	# one: finds the licence in its slot, unpacks, decrypts, starts. The
+	# machine that starts must be the one the dump starts - every line of the
+	# run above. And the wrong licence, another game's, installs nothing.
+	if python3 "$here/tests/make-pkg.py" "$game" "$root/extern/vita3k/vita3k/packages/include/packages/pkg.h" \
+		"$work/alien-shooter.pkg" "$work/alien-shooter-work.bin" >"$work/make-pkg.txt" 2>&1; then
+		(native alien-shooter-pkg-n "$work/alien-shooter.pkg" 300 --licence "$work/alien-shooter-work.bin" --firmware PSVUPDAT.PUP="$sysw" --firmware PSP2UPDAT.PUP="$fonts" --digest-every 30 >"$work/alien-shooter-pkg-n.rc") &
+		rw=$(sandboxed alien-shooter-pkg-w "$work/alien-shooter.pkg" 300 --licence "$work/alien-shooter-work.bin" --firmware PSVUPDAT.PUP="$sysw" --firmware PSP2UPDAT.PUP="$fonts" --digest-every 30)
+		wait
+		rn=$(cat "$work/alien-shooter-pkg-n.rc")
+		sed 's/^app=[^ ]*//' "$work/alien-shooter-full-n.out" >"$work/alien-shooter-dump.lines"
+		sed 's/^app=[^ ]*//' "$work/alien-shooter-pkg-n.out" >"$work/alien-shooter-pkg-n.lines"
+		sed 's/^app=[^ ]*//' "$work/alien-shooter-pkg-w.out" >"$work/alien-shooter-pkg-w.lines"
+		if [ "$rn" = 0 ] && [ "$rw" = 0 ] && cmp -s "$work/alien-shooter-dump.lines" "$work/alien-shooter-pkg-n.lines" \
+			&& cmp -s "$work/alien-shooter-dump.lines" "$work/alien-shooter-pkg-w.lines" \
+			&& ! grep -q "sanity check" "$work/alien-shooter-pkg-n.out" "$work/alien-shooter-pkg-n.err" "$work/alien-shooter-pkg-w.out" "$work/alien-shooter-pkg-w.err"; then
+			pass "Alien Shooter as a package with its licence: the machine the dump starts, in all 300 frames, native and sandbox ($(sed 's/^[^:]*: //' "$work/make-pkg.txt"))"
+		else
+			fail "Alien Shooter as a package (exit $rn, $rw) - $(diff "$work/alien-shooter-dump.lines" "$work/alien-shooter-pkg-w.lines" | sed -n 2p)$(tail -1 "$work/alien-shooter-pkg-n.err")"
+		fi
+		other="$content/alien-breed.zip"
+		if [ -f "$other" ] && unzip -p "$other" '*/sce_sys/package/work.bin' >"$work/other-work.bin" 2>/dev/null && [ -s "$work/other-work.bin" ]; then
+			r=$(native alien-shooter-pkg-wrong "$work/alien-shooter.pkg" 5 --licence "$work/other-work.bin" --firmware PSP2UPDAT.PUP="$fonts")
+			if [ "$r" != 0 ] && grep -q "did not install" "$work/alien-shooter-pkg-wrong.err"; then
+				pass "the package with another game's licence installs nothing, and says so"
+			else
+				fail "the package with another game's licence was not refused (exit $r) - $(tail -1 "$work/alien-shooter-pkg-wrong.err")"
+			fi
+		else
+			skip "the package with another game's licence: no second dump at $other"
+		fi
+	else
+		fail "the dump could not be packed as a package - $(tail -1 "$work/make-pkg.txt")"
+	fi
 else
 	skip "Alien Shooter on the system software: no $sysw"
+	skip "Alien Shooter as a package: no $game with $sysw"
 fi
 
 # Alien Breed (PCSE00210; Ingame on Vita3K's list) asks for the network at
