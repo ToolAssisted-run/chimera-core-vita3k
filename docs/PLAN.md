@@ -561,6 +561,27 @@ sandbox. With Alien Breed's licence it installs nothing. What this does NOT
 show is a package as Sony made it - the container here is ours, checked
 only by Vita3K's reader. The reporter has real ones.
 
+### Two waits that never ended (2026-10-08, chimera#201, chimera#205)
+
+Two games stopped for good, each in a wait nothing could end (patch 0010).
+
+Geometry Wars 3 (PCSB00625) hung at "creating save data". Vita3K's overlay
+stops its input loop with `std::atomic::wait`; under our scheduler the
+threads take turns, the waiter never gave its turn away, and the loop it
+waited for never ran again. The wait is now a sleep on machine time until
+the flag is set. Any host-level blocking wait in Vita3K is this bug again.
+
+Fruit Ninja (PCSB00077) froze a few seconds into a round, and only with
+sound - the reporter saw the same in Vita3K itself. The game releases a
+rack from inside the sound system's own update; `sceNgsRackRelease` then
+waits for the update to finish, on the thread that is running it. A release
+with no callback, asked by the updating thread, is now queued like a
+release with one, and done when the update ends. This one is upstream's,
+not ours: the same patch would fix it there.
+
+Gate legs: each game from a zip, to the place it used to stop and past it,
+the same native and sandboxed in every digest line (3000 and 4200 frames).
+
 ## Open questions
 
 - SDL stays linked (threads in the kernel, pads, audio): M4 decides whether

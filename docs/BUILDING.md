@@ -338,8 +338,8 @@ What runs with nothing provided, which is what CI runs:
 
 The legs that need a game or the firmware look in `build/content/` (or the
 folder `VITA3K_CONTENT` names) for `alien-shooter.zip`, `alien-breed.zip`,
-`PSP2UPDAT.PUP` and `PSVUPDAT.PUP`. Without them these say `SKIP` and name
-what they lacked:
+`fruit-ninja.zip`, `geometry-wars-3.zip`, `PSP2UPDAT.PUP` and
+`PSVUPDAT.PUP`. Without them these say `SKIP` and name what they lacked:
 
 - `alien-shooter.zip` with `PSP2UPDAT.PUP`: native == sandbox over 300
   frames; the font package handed over as the system software is refused.
@@ -348,6 +348,10 @@ what they lacked:
   With `alien-breed.zip` there as well: the package with another game's
   licence installs nothing.
 - `alien-breed.zip` with `PSP2UPDAT.PUP`: native == sandbox over 600 frames.
+- `fruit-ninja.zip` with both: an arcade round runs with sound past the
+  place it froze, native == sandbox over 3000 frames.
+- `geometry-wars-3.zip` with both: the save data is made and the menu runs,
+  native == sandbox over 4200 frames.
 
 Run the full gate, with the content, before pushing: CI cannot.
 

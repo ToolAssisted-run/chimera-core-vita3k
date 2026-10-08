@@ -397,6 +397,58 @@ if [ -f "$game" ] && [ -f "$fonts" ]; then
 else
 	skip "Alien Shooter: no $game and $fonts"
 fi
+
+# Two games that stopped, each on a wait that could not end (chimera issues
+# #201 and #205), driven by the input scripts in tests/. They need the games:
+# build/content/fruit-ninja.zip and geometry-wars-3.zip, and both .PUP files.
+sysw_two="$content/PSVUPDAT.PUP"
+both_pups="--firmware PSP2UPDAT.PUP=$fonts --firmware PSVUPDAT.PUP=$sysw_two"
+# <name> <first frame>: how many different pictures the run drew from there on
+pictures_from() {
+	awk -v from="$2" '$1 == "frame" && $2 + 0 >= from { for (i = 3; i <= NF; i++) if ($i ~ /^video=/) print $i }' "$work/$1.out" | sort -u | wc -l
+}
+game="$content/fruit-ninja.zip"
+if [ -f "$game" ] && [ -f "$fonts" ] && [ -f "$sysw_two" ]; then
+	# A voice's callback - the end of a stream - releases its rack, and Vita3K
+	# waited there for the sound update to finish: the update that was making
+	# that very call. The round began with "SAVING..." and stayed on it, one
+	# picture for ever, in Vita3K itself as here.
+	(native fruit-n "$game" 3000 $both_pups --input "$here/tests/fruit-ninja-arcade.txt" >"$work/fruit-n.rc") &
+	rw=$(sandboxed fruit-w "$game" 3000 $both_pups --input "$here/tests/fruit-ninja-arcade.txt")
+	wait
+	rn=$(cat "$work/fruit-n.rc")
+	moving=$(pictures_from fruit-w 2500)
+	if [ "$rn" != 0 ] || [ "$rw" != 0 ] || ! cmp -s "$work/fruit-n.out" "$work/fruit-w.out"; then
+		fail "Fruit Ninja: native and sandbox differ (exit $rn, $rw) - $(diff "$work/fruit-n.out" "$work/fruit-w.out" | sed -n 2p | cut -c1-100)"
+	elif [ "$moving" -lt 10 ]; then
+		fail "Fruit Ninja: the arcade round is not running - $moving pictures in its last 500 frames (stuck on SAVING is 1)"
+	else
+		pass "Fruit Ninja: the arcade round runs past its first save, $moving pictures in the last 500 frames, native == sandbox in all 3000"
+	fi
+else
+	skip "Fruit Ninja: no $game (and both .PUP files)"
+fi
+game="$content/geometry-wars-3.zip"
+if [ -f "$game" ] && [ -f "$fonts" ] && [ -f "$sysw_two" ]; then
+	# The dialog overlay waited for its input loop with an atomic's wait, which
+	# parks the HOST thread: the machine's threads take turns, the one waited
+	# for never got its turn, and every thread waited for ever. Natively the
+	# run hung; in the sandbox miniBox called it a deadlock and ended it.
+	(native gw3-n "$game" 4200 $both_pups --input "$here/tests/geometry-wars-cross.txt" >"$work/gw3-n.rc") &
+	rw=$(sandboxed gw3-w "$game" 4200 $both_pups --input "$here/tests/geometry-wars-cross.txt")
+	wait
+	rn=$(cat "$work/gw3-n.rc")
+	after=$(pictures_from gw3-w 3600)
+	if [ "$rn" != 0 ] || [ "$rw" != 0 ] || ! cmp -s "$work/gw3-n.out" "$work/gw3-w.out"; then
+		fail "Geometry Wars 3: the run ended or the flavours differ (exit $rn, $rw) - $(tail -1 "$work/gw3-w.err" | cut -c1-100)"
+	elif [ "$after" -lt 5 ]; then
+		fail "Geometry Wars 3: nothing moves after the save data is made - $after pictures in the last 600 frames"
+	else
+		pass "Geometry Wars 3: Cross at the title, the save data is made and the menu runs ($after pictures in the last 600 frames), native == sandbox in all 4200"
+	fi
+else
+	skip "Geometry Wars 3: no $game (and both .PUP files)"
+fi
 # The system software as well (System Software "full"): Alien Shooter loads
 # the system's own libraries from it, and none is missing.
 sysw="$content/PSVUPDAT.PUP"
