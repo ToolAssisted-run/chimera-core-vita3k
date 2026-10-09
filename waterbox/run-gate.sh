@@ -425,6 +425,45 @@ if [ -f "$game" ] && [ -f "$fonts" ] && [ -f "$sysw_two" ]; then
 	else
 		pass "Fruit Ninja: the arcade round runs past its first save, $moving pictures in the last 500 frames, native == sandbox in all 3000"
 	fi
+	# The cure for that was first to put the release off to the end of the
+	# update, and it was wrong: a rack is an object IN the memory the game
+	# gave for it, and Fruit Ninja frees that memory before the callback
+	# returns. With one rack released in an update nothing showed; in the
+	# movie attached to chimera#222 three sounds end in one update near frame
+	# 575, the game's allocator writes its free list through the first rack
+	# while the other two are released, and the deferred release then freed a
+	# list of voices that was two of the game's pointers - the core died in
+	# free(). The rack goes inside the call now. The script is that movie's
+	# touches; the round must still be drawing 200 frames after.
+	(native fruit3-n "$game" 800 $both_pups --input "$here/tests/fruit-ninja-three-racks.txt" >"$work/fruit3-n.rc") &
+	rw=$(sandboxed fruit3-w "$game" 800 $both_pups --input "$here/tests/fruit-ninja-three-racks.txt")
+	wait
+	rn=$(cat "$work/fruit3-n.rc")
+	moving=$(pictures_from fruit3-w 600)
+	heard=$(awk '$1 == "frame" { for (i = 3; i <= NF; i++) if ($i ~ /^audio=/) print $i }' "$work/fruit3-w.out" | sort -u | wc -l)
+	if [ "$rn" != 0 ] || [ "$rw" != 0 ] || ! cmp -s "$work/fruit3-n.out" "$work/fruit3-w.out"; then
+		fail "Fruit Ninja: three racks released in one update - the core died or the flavours differ (exit $rn, $rw) - $(tail -1 "$work/fruit3-w.err" | cut -c1-100)"
+	elif [ "$moving" -lt 10 ]; then
+		fail "Fruit Ninja: three racks released in one update - the round stopped, $moving pictures in its last 200 frames"
+	else
+		pass "Fruit Ninja: three racks released in one sound update and the round goes on, $moving pictures in the last 200 frames, native == sandbox in all 800"
+	fi
+	# The NGS setting (Vita3K's Enable NGS Support): off, every NGS call
+	# answers having done nothing. The same script then runs with no sound at
+	# all - one audio digest in the whole run, where on has many - and it is
+	# the same in both flavours.
+	(native fruitoff-n "$game" 800 $both_pups --input "$here/tests/fruit-ninja-three-racks.txt" --ngs off >"$work/fruitoff-n.rc") &
+	rw=$(sandboxed fruitoff-w "$game" 800 $both_pups --input "$here/tests/fruit-ninja-three-racks.txt" --ngs off)
+	wait
+	rn=$(cat "$work/fruitoff-n.rc")
+	silent=$(awk '$1 == "frame" { for (i = 3; i <= NF; i++) if ($i ~ /^audio=/) print $i }' "$work/fruitoff-w.out" | sort -u | wc -l)
+	if [ "$rn" != 0 ] || [ "$rw" != 0 ] || ! cmp -s "$work/fruitoff-n.out" "$work/fruitoff-w.out"; then
+		fail "NGS off: the run died or the flavours differ (exit $rn, $rw)"
+	elif [ "$silent" != 1 ] || [ "$heard" -lt 10 ]; then
+		fail "NGS off: $silent different sounds in the run with it off (silence is 1), $heard with it on"
+	else
+		pass "NGS off: Fruit Ninja runs the same 800 frames without a sound ($heard different sounds with it on, 1 with it off), native == sandbox"
+	fi
 else
 	skip "Fruit Ninja: no $game (and both .PUP files)"
 fi

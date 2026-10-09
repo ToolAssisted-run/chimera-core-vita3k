@@ -378,7 +378,7 @@ Patch 0006 and `waterbox/driver` (`set_input`, `savedata.cpp`).
   every frame and the pictures outside the window.
 - Settings: System Software (full / fonts / none), System Language (the
   Vita's twenty), Enter Button (cross / circle), Clock at Power-On, CPU
-  Clock. Language and enter button are the system parameters games read
+  Clock, NGS Audio (on / off). Language and enter button are the system parameters games read
   (sceAppUtilSystemParamGetInt); InputTest prints them, and a leg sees them
   arrive.
 - Firmware: the system software (PSVUPDAT.PUP) and the font package
@@ -581,6 +581,54 @@ not ours: the same patch would fix it there.
 
 Gate legs: each game from a zip, to the place it used to stop and past it,
 the same native and sandboxed in every digest line (3000 and 4200 frames).
+
+### A rack released from its own update goes at once (2026-10-09, chimera#222)
+
+The cure for Fruit Ninja above was wrong, and a movie of an arcade round
+killed the core with it: a `free()` of a pointer that was two of the game's
+own addresses, in the release at the end of the update.
+
+A rack is an object IN the memory the game gave for it - Vita3K builds it
+there, its list of voices and the voices too - and a game that has released a
+rack has that memory back. Fruit Ninja frees the block before the callback
+returns, and its allocator writes the free list's links through it. Put off
+to the end of the update, the release read a rack the game had already
+written over. One rack released in an update happened to survive; in the
+reported movie three sounds end in one update near frame 575, freeing the
+second and third blocks rewrote the first one's list of voices, and the
+release freed that.
+
+So the rack goes inside the call (patch 0010), and the update is told which
+voices went with it: `VoiceScheduler::strike` empties their places in the
+update's copy of the queue, and the update does not read a voice it was half
+way through, take its lock, or deliver sound to it. The two modules that call
+a game back from inside their decoding (Atrac9, Player) leave when the
+callback released their rack, letting go of the voice's lock without taking
+it - which is also how the update knows (patch 0011). A release with a
+callback is still done when the update ends, as upstream has it: there the
+game is waiting to be told. Like the wait it replaces this is upstream's
+bug as much as ours - its synchronous release deadlocks where ours died.
+
+Found by running the movie's touches on the native runner with the release
+traced: three "release" lines in a row for three listed racks, then the first
+pending one destroyed, then the trap. The harness counts frames from 1 and a
+movie from 0, and one frame early the round does not have three sounds
+ending together - the first attempt ran 4000 frames clean.
+
+Gate legs: the movie's touches (tests/fruit-ninja-three-racks.txt) for 800
+frames, the same native and sandboxed, the round still drawing at the end;
+the published core dies on it between frames 500 and 600, at the address in
+the report.
+
+### NGS can be turned off (user-decided, 2026-10-09, chimera#222)
+
+The reporter asked for Vita3K's "Enable NGS Support" as a setting, and the
+owner said to add it as well as fixing the crash. `ngs` (on / off, on by
+default) is `ngs_enable`: off, every NGS call answers at once having done
+nothing, and a game that mixes with NGS has no sound. It is a setting of the
+machine - what a game hears back from the library shapes its timing - so a
+project carries it. The gate runs the same script with it off: the same
+frames, one audio digest in the whole run, native and sandbox alike.
 
 ## Open questions
 

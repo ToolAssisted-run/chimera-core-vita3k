@@ -223,6 +223,14 @@ ECL_EXPORT int Init(void) {
         }
         options.enter_button = enter == "cross" ? 1 : 0;
     }
+    const std::string ngs = json_string(settings, "ngs");
+    if (!ngs.empty()) {
+        if (ngs != "on" && ngs != "off") {
+            g_error = "no such NGS setting: " + ngs;
+            return 0;
+        }
+        options.ngs = ngs == "on";
+    }
     options.savedata = mounted(slot_first(slots, "savedata"));
     options.licence = mounted(slot_first(slots, "licence"));
     for (const char *id : { "PSVUPDAT.PUP", "PSP2UPDAT.PUP" })

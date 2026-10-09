@@ -17,6 +17,9 @@ struct Options {
     uint64_t rtc_start = 0; // Unix seconds; 0: the machine's (2013-01-01)
     int language = 1; // SceSystemParamLang: 1 is English (United States)
     int enter_button = 1; // SceSystemParamEnterButtonAssign: 1 Cross, 0 Circle
+    // Vita3K's "Enable NGS Support": off, every NGS call answers at once
+    // having done nothing, and a game that mixes with NGS is silent
+    bool ngs = true;
     // the gate's negative control: the GPU's pictures stay on the GPU, and a
     // state cannot hold them
     bool no_surface_sync = false;

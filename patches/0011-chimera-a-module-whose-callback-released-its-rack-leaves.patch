@@ -1,0 +1,148 @@
+diff --git a/vita3k/ngs/include/ngs/system.h b/vita3k/ngs/include/ngs/system.h
+--- a/vita3k/ngs/include/ngs/system.h
++++ b/vita3k/ngs/include/ngs/system.h
+@@ -209,7 +209,9 @@
+         return info.data.cast<T>().get(mem);
+     }
+ 
+-    void invoke_callback(KernelState &kern, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
++    // chimera: false when the callback released the voice's rack - the voice
++    // and this are gone, and the caller leaves without touching either
++    bool invoke_callback(KernelState &kern, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
+         const uint32_t reason2, Address reason_ptr);
+ 
+     SceNgsBufferInfo *lock_params(const MemState &mem);
+diff --git a/vita3k/ngs/src/modules/atrac9.cpp b/vita3k/ngs/src/modules/atrac9.cpp
+--- a/vita3k/ngs/src/modules/atrac9.cpp
++++ b/vita3k/ngs/src/modules/atrac9.cpp
+@@ -105,19 +105,31 @@
+             if ((state->current_buffer == -1)
+                 || !params->buffer_params[state->current_buffer].buffer
+                 || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
+-                data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_END_OF_DATA, 0, 0);
++                // chimera: a callback may release this voice's rack (Fruit
++                // Ninja does, here). The voice, its lock and everything this
++                // function was handed are then gone: the lock is let go of
++                // without being taken, which is also how the caller knows.
++                if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_END_OF_DATA, 0, 0)) {
++                    scheduler_lock.lock();
++                    voice_lock.release();
++                    return false;
++                }
+ 
+                 // we are done
+                 scheduler_lock.lock();
+                 voice_lock.lock();
+                 return false;
+-            } else {
+-                data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_SWAPPED_BUFFER, prev_index,
+-                    params->buffer_params[state->current_buffer].buffer.address());
++            } else if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_SWAPPED_BUFFER, prev_index,
++                           params->buffer_params[state->current_buffer].buffer.address())) {
++                scheduler_lock.lock();
++                voice_lock.release();
++                return false;
+             }
+-        } else {
+-            data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_LOOPED_BUFFER, logical->current_loop_count,
+-                params->buffer_params[state->current_buffer].buffer.address());
++        } else if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_LOOPED_BUFFER, logical->current_loop_count,
++                       params->buffer_params[state->current_buffer].buffer.address())) {
++            scheduler_lock.lock();
++            voice_lock.release();
++            return false;
+         }
+ 
+         scheduler_lock.lock();
+@@ -272,8 +284,13 @@
+         voice_lock.unlock();
+         scheduler_lock.unlock();
+ 
+-        data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_DECODE_ERROR, state->current_byte_position_in_buffer,
+-            params->buffer_params[state->current_buffer].buffer.address());
++        if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_DECODE_ERROR, state->current_byte_position_in_buffer,
++                params->buffer_params[state->current_buffer].buffer.address())) {
++            // chimera: the callback released the rack; the voice is gone
++            scheduler_lock.lock();
++            voice_lock.release();
++            return false;
++        }
+ 
+         scheduler_lock.lock();
+         voice_lock.lock();
+@@ -315,6 +332,10 @@
+             break;
+         }
+     }
++    // chimera: a callback released the rack while decoding (the lock has no
++    // voice any more): there is nothing to hand on and nothing to read
++    if (!voice_lock.mutex())
++        return false;
+ 
+     const uint32_t granularity = static_cast<uint32_t>(data.parent->rack->system->granularity);
+     const uint32_t available_samples = logical->decoded_pcm.available_frames();
+diff --git a/vita3k/ngs/src/modules/player.cpp b/vita3k/ngs/src/modules/player.cpp
+--- a/vita3k/ngs/src/modules/player.cpp
++++ b/vita3k/ngs/src/modules/player.cpp
+@@ -147,20 +147,32 @@
+                 if ((state->current_buffer == -1)
+                     || !params->buffer_params[state->current_buffer].buffer
+                     || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
+-                    data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_END_OF_DATA, 0, 0);
++                    // chimera: a callback may release this voice's rack.
++                    // The voice, its lock and everything this function was
++                    // handed are then gone: the lock is let go of without
++                    // being taken, which is also how the caller knows.
++                    if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_END_OF_DATA, 0, 0)) {
++                        scheduler_lock.lock();
++                        voice_lock.release();
++                        return false;
++                    }
+ 
+                     // we are done
+                     finished = true;
+                     scheduler_lock.lock();
+                     voice_lock.lock();
+                     break;
+-                } else {
+-                    data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_SWAPPED_BUFFER, prev_index,
+-                        params->buffer_params[state->current_buffer].buffer.address());
++                } else if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_SWAPPED_BUFFER, prev_index,
++                               params->buffer_params[state->current_buffer].buffer.address())) {
++                    scheduler_lock.lock();
++                    voice_lock.release();
++                    return false;
+                 }
+-            } else {
+-                data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_LOOPED_BUFFER, logical->current_loop_count,
+-                    params->buffer_params[state->current_buffer].buffer.address());
++            } else if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_LOOPED_BUFFER, logical->current_loop_count,
++                           params->buffer_params[state->current_buffer].buffer.address())) {
++                scheduler_lock.lock();
++                voice_lock.release();
++                return false;
+             }
+ 
+             scheduler_lock.lock();
+diff --git a/vita3k/ngs/src/ngs.cpp b/vita3k/ngs/src/ngs.cpp
+--- a/vita3k/ngs/src/ngs.cpp
++++ b/vita3k/ngs/src/ngs.cpp
+@@ -144,10 +144,16 @@
+     return false;
+ }
+ 
+-void ModuleData::invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
++bool ModuleData::invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
+     const uint32_t reason2, Address reason_ptr) {
+-    return parent->invoke_callback(kernel, mem, thread_id, callback, user_data, parent->rack->modules[index]->module_id(),
++    // chimera: the callback may release this voice's rack, and then nothing
++    // of the voice is left to ask - this ModuleData included. What says so is
++    // the scheduler, which is the system's and outlives the rack.
++    Voice *const voice = parent;
++    VoiceScheduler &scheduler = voice->rack->system->voice_scheduler;
++    voice->invoke_callback(kernel, mem, thread_id, callback, user_data, voice->rack->modules[index]->module_id(),
+         reason1, reason2, reason_ptr);
++    return scheduler.still_walking(voice);
+ }
+ 
+ void Voice::init(Rack *mama) {

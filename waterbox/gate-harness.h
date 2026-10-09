@@ -8,6 +8,7 @@
  *        [--no-surface-sync] [--free-hle-calls] [--input FILE] [--audio-out FILE]
  *        [--internal-resolution 1x..4x] [--licence WORK.BIN]
  *        [--savedata-in ZIP] [--savedata-out DIR] [--language L] [--enter-button B]
+ *        [--ngs on|off]
  *        [--turbo A:B] [--firmware ID=PATH]...
  *
  * --rerecord saves and loads a state before every frame; --save-state writes
@@ -60,7 +61,7 @@ struct harness_opts {
 	const char *save_state, *load_state;
 	const char *input, *audio_out, *savedata_in, *savedata_out;
 	const char *licence;
-	const char *language, *enter_button;
+	const char *language, *enter_button, *ngs;
 	const char *internal_resolution;
 	int firmware_n;
 	const char *firmware_id[4], *firmware_path[4];
@@ -132,6 +133,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 			o->firmware_path[o->firmware_n++] = eq + 1;
 		}
 		else if (!strcmp(a, "--enter-button") && i + 1 < argc) o->enter_button = argv[++i];
+		else if (!strcmp(a, "--ngs") && i + 1 < argc) o->ngs = argv[++i];
 		else if (!strcmp(a, "--turbo") && i + 1 < argc) {
 			if (sscanf(argv[++i], "%" SCNu64 ":%" SCNu64, &o->turbo_from, &o->turbo_to) != 2) { fprintf(stderr, "--turbo wants A:B\n"); return 0; }
 		}
@@ -150,7 +152,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 		fprintf(stderr, "usage: %s <app.vpk> --work <dir> [--frames N] [--timeout S] [--digest-every N]"
 			" [--screenshot F=PATH]... [--cpu-mhz N] [--rtc-start S] [--rerecord] [--save-state FILE]"
 			" [--state FILE] [--no-surface-sync] [--free-hle-calls] [--internal-resolution 1x..4x] [--input FILE] [--audio-out FILE] [--savedata-in ZIP]"
-			" [--savedata-out DIR] [--language L] [--enter-button B] [--turbo A:B]\n", argv[0]);
+			" [--savedata-out DIR] [--language L] [--enter-button B] [--ngs on|off] [--turbo A:B]\n", argv[0]);
 		return 0;
 	}
 	return 1;
@@ -236,6 +238,7 @@ static void harness_settings(const struct harness_opts *o, char *buf, size_t n)
 		o->cpu_mhz, o->rtc_start, o->no_surface_sync, o->free_hle_calls);
 	if (o->language) k += snprintf(buf + k, n - k, ", \"language\": \"%s\"", o->language);
 	if (o->enter_button) k += snprintf(buf + k, n - k, ", \"enter_button\": \"%s\"", o->enter_button);
+	if (o->ngs) k += snprintf(buf + k, n - k, ", \"ngs\": \"%s\"", o->ngs);
 	if (o->internal_resolution) k += snprintf(buf + k, n - k, ", \"internal_resolution\": \"%s\"", o->internal_resolution);
 	snprintf(buf + k, n - k, "}");
 }

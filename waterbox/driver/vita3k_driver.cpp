@@ -237,6 +237,7 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     // the system parameters games read (sceAppUtilSystemParamGetInt)
     cfg.sys_lang = options.language;
     cfg.sys_button = options.enter_button;
+    cfg.ngs_enable = options.ngs;
 
     if (!app::init(emuenv, cfg, root_paths)) {
         error = "the emulated environment could not be made";

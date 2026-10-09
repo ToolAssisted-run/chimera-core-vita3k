@@ -1,7 +1,7 @@
 diff --git a/vita3k/modules/SceNgsUser/SceNgs.cpp b/vita3k/modules/SceNgsUser/SceNgs.cpp
 --- a/vita3k/modules/SceNgsUser/SceNgs.cpp
 +++ b/vita3k/modules/SceNgsUser/SceNgs.cpp
-@@ -360,6 +360,22 @@
+@@ -360,6 +360,28 @@
      std::unique_lock<std::recursive_mutex> lock(rack->system->voice_scheduler.mutex);
      if (!rack->system->voice_scheduler.is_updating) {
          ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
@@ -11,23 +11,29 @@ diff --git a/vita3k/modules/SceNgsUser/SceNgs.cpp b/vita3k/modules/SceNgsUser/Sc
 +        // finish, as below, is waiting for this very call to return: the
 +        // thread never wakes, the next one to release a rack queues up behind
 +        // it, and the game sits on whatever it was doing (Fruit Ninja on
-+        // "SAVING...", in Vita3K itself as here). The rack cannot go while
-+        // its voices are being walked, so it goes when the walk is over, as
-+        // an asynchronous release does, with no callback to run.
-+        ngs::OperationPending op;
-+        op.type = ngs::PendingType::ReleaseRack;
-+        op.system = rack->system;
-+        op.release_data.state = &emuenv.ngs;
-+        op.release_data.rack = rack;
-+        op.release_data.callback = 0;
-+        rack->system->voice_scheduler.operations_pending.push(op);
++        // "SAVING...", in Vita3K itself as here).
++        //
++        // Nor can it be put off to the end of the update, which is what this
++        // did first: the rack and its voices are objects IN the memory the
++        // game gave for them, and a game that has released a rack has its
++        // memory back. Fruit Ninja frees the block before the callback
++        // returns, and its allocator writes the free list's links through
++        // it - with three racks released in one update, over the first one's
++        // list of voices, which the release then freed as a pointer
++        // (chimera#222). So the rack goes now, and the update is told which
++        // voices went with it (VoiceScheduler::strike): it does not touch
++        // them again.
++        ngs::System *const system = rack->system;
++        for (const auto &voice : rack->voices)
++            system->voice_scheduler.strike(voice.get(emuenv.mem));
++        ngs::release_rack(emuenv.ngs, emuenv.mem, system, rack);
      } else if (!callback) {
          // wait for the update to finish
          // if this is called in an interrupt handler it will softlock ngs
 diff --git a/vita3k/ngs/include/ngs/scheduler.h b/vita3k/ngs/include/ngs/scheduler.h
 --- a/vita3k/ngs/include/ngs/scheduler.h
 +++ b/vita3k/ngs/include/ngs/scheduler.h
-@@ -64,6 +64,10 @@
+@@ -64,6 +64,18 @@
      std::recursive_mutex mutex;
      machine::condition_variable condvar;
      bool is_updating = false;
@@ -35,13 +41,37 @@ diff --git a/vita3k/ngs/include/ngs/scheduler.h b/vita3k/ngs/include/ngs/schedul
 +    // callback runs ON that thread, in the middle of the update, and what it
 +    // asks for then cannot wait for the update to end: it is the update.
 +    SceUID updating_thread = 0;
++    // chimera: the voices the update under way is walking - its own copy of
++    // the queue - while it is. A rack released from inside the update takes
++    // its voices out of the walk (strike): the memory they were in is the
++    // game's again when the release returns, and the update must not read a
++    // voice it was half way through, lock it, or deliver sound to it.
++    std::vector<Voice *> *walking = nullptr;
++    void strike(const Voice *voice);
++    bool still_walking(const Voice *voice) const;
  
  protected:
      void deque_insert(const MemState &mem, Voice *voice);
 diff --git a/vita3k/ngs/src/scheduler.cpp b/vita3k/ngs/src/scheduler.cpp
 --- a/vita3k/ngs/src/scheduler.cpp
 +++ b/vita3k/ngs/src/scheduler.cpp
-@@ -125,6 +125,7 @@
+@@ -122,19 +122,41 @@
+     return true;
+ }
+ 
++void VoiceScheduler::strike(const Voice *voice) {
++    if (!walking)
++        return;
++    for (Voice *&walked : *walking) {
++        if (walked == voice)
++            walked = nullptr;
++    }
++}
++
++bool VoiceScheduler::still_walking(const Voice *voice) const {
++    return !walking || std::find(walking->begin(), walking->end(), voice) != walking->end();
++}
++
  void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID thread_id) {
      std::unique_lock<std::recursive_mutex> scheduler_lock(mutex);
      is_updating = true;
@@ -49,19 +79,62 @@ diff --git a/vita3k/ngs/src/scheduler.cpp b/vita3k/ngs/src/scheduler.cpp
  
      // make a copy of the queue, this way we have no issue if it is modified in a callback
      std::vector<ngs::Voice *> queue_copy = queue;
-@@ -179,8 +180,10 @@
-         switch (op.type) {
-         case PendingType::ReleaseRack:
-             release_rack(*op.release_data.state, mem, op.system, op.release_data.rack);
--            // run callback (we know it is defined)
--            kern.get_thread(thread_id)->run_callback(op.release_data.callback, { Ptr<void>(op.release_data.rack, mem).address() });
-+            // run callback (chimera: when there is one - a release asked for
-+            // from inside a voice's callback has none, see sceNgsRackRelease)
-+            if (op.release_data.callback)
-+                kern.get_thread(thread_id)->run_callback(op.release_data.callback, { Ptr<void>(op.release_data.rack, mem).address() });
-             break;
-         }
++    // chimera: and a callback may do more than modify the queue - it may
++    // release a voice's rack, which empties that voice's place here (strike)
++    walking = &queue_copy;
  
+     // Do a first routine to clear inputs from previous update session
+     for (ngs::Voice *voice : queue_copy) {
+         voice->inputs.reset_inputs();
+     }
+ 
+-    for (ngs::Voice *voice : queue_copy) {
++    for (size_t walked = 0; walked < queue_copy.size(); walked++) {
++        ngs::Voice *voice = queue_copy[walked];
++        // chimera: its rack was released by a voice before it
++        if (!voice)
++            continue;
++
+         // Modify the state, in peace....
+         std::unique_lock<std::mutex> voice_lock(*voice->voice_mutex);
+         memset(voice->products, 0, sizeof(voice->products));
+@@ -148,8 +170,16 @@
+                     finished = true;
+                     finished_module = voice->rack->modules[i]->module_id();
+                 }
++                // chimera: the module's callback released the rack - there is
++                // no next module, and no voice
++                if (!queue_copy[walked])
++                    break;
+             }
+         }
++        if (!queue_copy[walked]) {
++            voice_lock.release();
++            continue;
++        }
+         if (finished) {
+             voice->is_keyed_off = true;
+             voice->transition(mem, VOICE_STATE_FINALIZING);
+@@ -158,6 +188,11 @@
+                 scheduler_lock.unlock();
+                 voice->invoke_callback(kern, mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, finished_module);
+                 scheduler_lock.lock();
++                // chimera: and so may this one
++                if (!queue_copy[walked]) {
++                    voice_lock.release();
++                    continue;
++                }
+                 voice_lock.lock();
+             }
+             voice->is_keyed_off = false;
+@@ -172,6 +207,7 @@
+ 
+         voice->frame_count++;
+     }
++    walking = nullptr;
+ 
+     while (!operations_pending.empty()) {
+         OperationPending &op = operations_pending.front();
 diff --git a/vita3k/overlay/src/overlay.cpp b/vita3k/overlay/src/overlay.cpp
 --- a/vita3k/overlay/src/overlay.cpp
 +++ b/vita3k/overlay/src/overlay.cpp
