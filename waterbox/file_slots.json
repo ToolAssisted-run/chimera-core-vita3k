@@ -1,5 +1,5 @@
 {
-  "_comment": "A Vita project is one game, the licence a packaged one needs, and whatever the game already saved. The system software is firmware (the System Software setting says which).",
+  "_comment": "This file lists the kinds of file a Vita project can hold. Chimera's New Project window is built from it. A project is one game, the licence a packaged game needs, and optionally what the game already saved. The system software is given as firmware, and the System Software setting says which parts.",
   "slots": [
     {
       "id": "game",
@@ -11,7 +11,7 @@
         "zip",
         "pkg"
       ],
-      "help": "The game: a .vpk, a NoNpDRM dump as a .zip (the game's folder with its sce_sys/package/work.bin), or the PlayStation Store's own package, a .pkg, with the game's licence in the Licence slot. Vita3K installs it into the machine before it starts. Vita3K's compatibility list (vita3k.org/compatibility) says which games work."
+      "help": "The game, in one of three forms. It can be a .vpk file. It can be a NoNpDRM dump packed as a .zip (the game's folder, including its sce_sys/package/work.bin). Or it can be a PlayStation Store package (.pkg), with the game's licence in the Licence slot. Vita3K installs it into the machine before it starts. Vita3K's compatibility list (vita3k.org/compatibility) says which games work."
     },
     {
       "id": "licence",
@@ -22,7 +22,7 @@
         "bin",
         "rif"
       ],
-      "help": "The licence a .pkg game is decrypted with: its work.bin (the 512-byte file a NoNpDRM dump keeps in sce_sys/package), or the console's own .rif for the game. A package is encrypted and installs nothing without it; a .vpk or a .zip dump needs none, because a dump carries its own. It is pinned by hash like the game, and the movie cites it.",
+      "help": "The licence that decrypts a .pkg game. It is either the game's work.bin (the 512-byte file a NoNpDRM dump keeps in sce_sys/package) or the console's own .rif file for the game. A package is encrypted and installs nothing without it. A .vpk or a .zip dump needs none, because a dump includes its own. The project and the movie record exactly which file was used, as they do for the game.",
       "exposedWhen": {
         "slot": "game",
         "extension": "pkg"
@@ -36,7 +36,7 @@
       "formats": [
         "zip"
       ],
-      "help": "What the game already saved, as Emulator > Export Save Data... wrote it: a .zip with savedata/<TITLE ID>/... (the save data system's) and data/... (where homebrew keeps its). A save copied off a Vita with ux0:/user/00/ in front, or a bare <TITLE ID>/ folder, is taken too. It goes into the machine before the game starts."
+      "help": "What the game already saved, as Emulator > Export Save Data... wrote it. It is a .zip with savedata/<TITLE ID>/... (the system's save data) and data/... (where homebrew keeps its files). A save copied from a Vita with ux0:/user/00/ in front of the path, or a plain <TITLE ID>/ folder, is accepted too. It is put into the machine before the game starts."
     }
   ]
 }
