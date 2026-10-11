@@ -50,6 +50,7 @@ mbhost="${MINIBOX_HOST_DIR:-$mb/build/meson-linux/source/host}"
 [ -f "$mbhost/libminiboxhost.so" ] || mbhost="$mbuild/source/host"
 gcc -O2 -g -Wall -DCHIMERA_GL_BRIDGE -I"$here" -I"$mb/source/host" -I"$mb/source/gl" \
 	-I"$here/glad/include" -I"$root/build/generated-gl" \
-	-o "$out/run-wbx" "$here/run-wbx.c" "$here/gl-host.c" "$here/glad/src/gl.c" \
-	"$mbhost/libminiboxhost.so" -Wl,-rpath,"$mbhost" -lEGL
+	-I"$mb/source/vk" -I"$root/build/generated-vk" -I"$mb/extern/vulkan-headers/include" \
+	-o "$out/run-wbx" "$here/run-wbx.c" "$here/gl-host.c" "$here/glad/src/gl.c" "$mb/source/vk/vk-host.c" \
+	"$mbhost/libminiboxhost.so" -Wl,-rpath,"$mbhost" -lEGL -ldl
 echo "built $out/run-wbx"

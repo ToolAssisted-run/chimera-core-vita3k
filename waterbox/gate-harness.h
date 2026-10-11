@@ -63,6 +63,7 @@ struct harness_opts {
 	const char *licence;
 	const char *language, *enter_button, *ngs;
 	const char *internal_resolution;
+	const char *renderer; /* opengl-hw (the default) or vulkan-hw */
 	int firmware_n;
 	const char *firmware_id[4], *firmware_path[4];
 	uint64_t turbo_from, turbo_to;
@@ -118,6 +119,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 		else if (!strcmp(a, "--rerecord")) o->rerecord = 1;
 		else if (!strcmp(a, "--no-surface-sync")) o->no_surface_sync = 1;
 		else if (!strcmp(a, "--internal-resolution") && i + 1 < argc) o->internal_resolution = argv[++i];
+		else if (!strcmp(a, "--renderer") && i + 1 < argc) o->renderer = argv[++i];
 		else if (!strcmp(a, "--free-hle-calls")) o->free_hle_calls = 1;
 		else if (!strcmp(a, "--input") && i + 1 < argc) o->input = argv[++i];
 		else if (!strcmp(a, "--audio-out") && i + 1 < argc) o->audio_out = argv[++i];
@@ -151,7 +153,7 @@ static int harness_parse(int argc, char **argv, struct harness_opts *o)
 	if (!o->app || !o->work) {
 		fprintf(stderr, "usage: %s <app.vpk> --work <dir> [--frames N] [--timeout S] [--digest-every N]"
 			" [--screenshot F=PATH]... [--cpu-mhz N] [--rtc-start S] [--rerecord] [--save-state FILE]"
-			" [--state FILE] [--no-surface-sync] [--free-hle-calls] [--internal-resolution 1x..4x] [--input FILE] [--audio-out FILE] [--savedata-in ZIP]"
+			" [--state FILE] [--no-surface-sync] [--free-hle-calls] [--internal-resolution 1x..4x] [--renderer opengl-hw|vulkan-hw] [--input FILE] [--audio-out FILE] [--savedata-in ZIP]"
 			" [--savedata-out DIR] [--language L] [--enter-button B] [--ngs on|off] [--turbo A:B]\n", argv[0]);
 		return 0;
 	}
@@ -240,6 +242,7 @@ static void harness_settings(const struct harness_opts *o, char *buf, size_t n)
 	if (o->enter_button) k += snprintf(buf + k, n - k, ", \"enter_button\": \"%s\"", o->enter_button);
 	if (o->ngs) k += snprintf(buf + k, n - k, ", \"ngs\": \"%s\"", o->ngs);
 	if (o->internal_resolution) k += snprintf(buf + k, n - k, ", \"internal_resolution\": \"%s\"", o->internal_resolution);
+	if (o->renderer) k += snprintf(buf + k, n - k, ", \"renderer\": \"%s\"", o->renderer);
 	snprintf(buf + k, n - k, "}");
 }
 

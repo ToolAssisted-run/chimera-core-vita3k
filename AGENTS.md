@@ -7,8 +7,9 @@ speedruns. It produces one file, `vita3k.chimeraCore`: Vita3K's libraries
 compiled as a guest for Chimera's sandbox (miniBox), a driver that runs the
 machine a frame at a time on its own scheduler and clock, and the
 declarations Chimera reads. Upstream is a pinned submodule; every change to
-it is a numbered patch. The picture is drawn by Vita3K's OpenGL renderer on
-the host's GPU, through Chimera's GPU bridge.
+it is a numbered patch. The picture is drawn on the host's GPU by Vita3K's
+OpenGL renderer through Chimera's GPU bridge, or by its Vulkan renderer
+through Chimera's Vulkan bridge (the Renderer setting).
 
 ## Layout
 
@@ -117,7 +118,9 @@ builds. The exit status is the number of failed legs: it must be 0. Logs:
   to the machine must be run with them. If you do not have them, say so in
   your report.
 - The gate needs an EGL that gives an OpenGL context with no display
-  (Mesa's llvmpipe in CI). It unsets `DISPLAY` itself.
+  (Mesa's llvmpipe in CI). It unsets `DISPLAY` itself. The Vulkan renderer's
+  checks need a Vulkan driver (Mesa's lavapipe in CI) and say `SKIP` without
+  one.
 - CI then runs Chimera's contract tests against the package
   (`docs/BUILDING.md`, Run the gates).
 

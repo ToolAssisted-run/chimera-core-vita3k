@@ -10,7 +10,8 @@ file from this repository's
 [Releases](https://github.com/ToolAssisted-run/chimera-core-vita3k/releases)
 page, or build it, and put it in the `Cores` folder beside `Chimera.exe`.
 File > Core Manager lists what is in that folder. The same file works on
-Linux and on Windows. The core draws on the machine's GPU, and most games
+Linux and on Windows. The core draws on the machine's GPU, with OpenGL or
+with Vulkan (the Renderer setting), and most games
 need the PS Vita system software and font package (`PSVUPDAT.PUP`,
 `PSP2UPDAT.PUP`), which the user provides.
 

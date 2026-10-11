@@ -22,6 +22,7 @@ extern "C" {
 int Init(void);
 const char *GetLoadError(void);
 void SetGpuBridge(uint64_t addr);
+void SetVulkanBridge(uint64_t addr);
 void SetGlThreadHooks(void (*bind)(), void (*release)());
 void FrameAdvance(uint64_t buttons);
 uint32_t *GetVideoBgra(void);
@@ -50,6 +51,11 @@ uintptr_t chimera_gl_host_dispatch(uintptr_t op, uintptr_t a, uintptr_t b, uintp
 int chimera_gl_host_bind_current(void);
 void chimera_gl_host_release_current(void);
 unsigned long chimera_gl_host_unhandled(long *last_op);
+// the Vulkan bridge's host half (miniBox source/vk/vk-host.h)
+int chimera_vk_host_init(char *err, int errlen);
+uintptr_t chimera_vk_host_dispatch(uintptr_t op, uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+const char *chimera_vk_host_description(void);
+unsigned long chimera_vk_host_refused(long *last_op);
 }
 
 static void bind_gl() {
@@ -129,6 +135,13 @@ int main(int argc, char **argv) {
     }
     SetGpuBridge(reinterpret_cast<uintptr_t>(&chimera_gl_host_dispatch));
     SetGlThreadHooks(bind_gl, release_gl);
+    // and the Vulkan bridge, as the engine offers both: a machine without
+    // Vulkan loses the vulkan-hw renderer and nothing else
+    char vkerr[256] = "";
+    if (chimera_vk_host_init(vkerr, sizeof vkerr) == 0)
+        SetVulkanBridge(reinterpret_cast<uintptr_t>(&chimera_vk_host_dispatch));
+    else
+        fprintf(stderr, "vulkan bridge: %s\n", vkerr);
 
     const harness_core c = { Init, GetLoadError, FrameAdvance, GetVideoBgra, GetVideoWidth, GetVideoHeight,
         GetFrameCount, GetExitedAt, GetMachineTimeNs, GetSwitchCount, GetLogSize, GetLogBuffer, nullptr, nullptr, nullptr,
@@ -140,6 +153,9 @@ int main(int argc, char **argv) {
     const unsigned long unhandled = chimera_gl_host_unhandled(&last);
     if (unhandled)
         fprintf(stderr, "gpu bridge: %lu calls had no case (last opcode %ld)\n", unhandled, last);
+    const unsigned long refused = chimera_vk_host_refused(&last);
+    if (refused)
+        fprintf(stderr, "vulkan bridge: %lu calls were refused (last opcode %ld)\n", refused, last);
     fflush(stdout);
     // Leave without tearing the machine down: its threads are parked machine
     // threads, and the process ending is the one stop they all obey.

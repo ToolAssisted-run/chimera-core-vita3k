@@ -61,10 +61,12 @@ jobs:
           submodules: recursive
 
       - name: Install build dependencies
-        # llvmpipe (Mesa's EGL) is the GPU both flavours draw on here.
+        # llvmpipe (Mesa's EGL) is the GPU both flavours draw on here, and
+        # lavapipe (Mesa's Vulkan, also on the processor) is what the Vulkan
+        # renderer's checks draw on.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 perl curl xz-utils bzip2 mono-complete libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libx11-dev libxext-dev libasound2-dev gcc-14 g++-14
+          sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 perl curl xz-utils bzip2 mono-complete libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libvulkan1 mesa-vulkan-drivers libx11-dev libxext-dev libasound2-dev gcc-14 g++-14
 
       - name: Use GCC 14
         # Vita3K uses libstdc++ 14 (std::ranges::to), and miniBox builds the

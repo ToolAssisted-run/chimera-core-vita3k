@@ -26,6 +26,14 @@ add_custom_command(OUTPUT ${GLHOST}
 	DEPENDS glhost-parts $<TARGET_OBJECTS:glhost-parts>
 	COMMAND_EXPAND_LISTS)
 
+# The Vulkan bridge, the same way: the guest's half (the vk* wrappers the
+# renderer is given in place of a loader) and the host's half, which finds the
+# machine's own Vulkan when asked. Each is built with the Vulkan headers the
+# bridge was generated from, not Vita3K's.
+set(GENVK ${W}/../build/generated-vk)
+add_library(chimera-vkbridge STATIC ${MB}/source/vk/vk-guest.c ${GENVK}/vk-bridge-guest.c ${MB}/source/vk/vk-host.c)
+target_include_directories(chimera-vkbridge PRIVATE ${MB}/source/vk ${MB}/source/host ${GENVK} ${MB}/extern/vulkan-headers/include)
+
 add_executable(vita3k-run-native
 	run-native.cpp
 	${CMAKE_SOURCE_DIR}/vita3k/interface.cpp
@@ -40,7 +48,7 @@ add_executable(vita3k-run-native
 	${GLHOST}
 )
 set_source_files_properties(${GLHOST} PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
-target_include_directories(vita3k-run-native PRIVATE ${CMAKE_SOURCE_DIR}/vita3k ${W}/driver ${MB}/source/gl ${GEN})
+target_include_directories(vita3k-run-native PRIVATE ${CMAKE_SOURCE_DIR}/vita3k ${W}/driver ${MB}/source/gl ${GEN} ${MB}/source/vk)
 # the generated wrappers want glad 2's types: built apart from Vita3K's glad
 set_source_files_properties(${GEN}/gl-bridge-guest.cpp PROPERTIES INCLUDE_DIRECTORIES "${W}/glad/include;${GEN};${MB}/source/gl")
 # the libraries upstream's program links, minus the GUI (which brought
@@ -48,7 +56,7 @@ set_source_files_properties(${GEN}/gl-bridge-guest.cpp PROPERTIES INCLUDE_DIRECT
 target_link_libraries(vita3k-run-native PRIVATE
 	app audio compat config cppcommon ctrl dialog display ime lang gdbstub gxm io miniz
 	modules motion packages patch renderer shader touch util psvpfsparser pugixml::pugixml
-	SDL3::SDL3 OpenGL::EGL)
+	SDL3::SDL3 OpenGL::EGL chimera-vkbridge ${CMAKE_DL_LIBS})
 
 set_target_properties(vita3k-run-native PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 # the machine's filesystem defines the C library's file calls: exported, so

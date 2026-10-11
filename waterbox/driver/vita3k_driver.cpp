@@ -208,7 +208,7 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
 
     // The program's own option parser with fixed answers: the OpenGL
     // backend, and the config file is never rewritten.
-    std::vector<std::string> args = { "vita3k", "-w", "-B", "OpenGL" };
+    std::vector<std::string> args = { "vita3k", "-w", "-B", options.vulkan ? "Vulkan" : "OpenGL" };
     std::vector<char *> args_c;
     for (auto &s : args)
         args_c.push_back(s.data());
@@ -228,6 +228,10 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     // Vita's GPU does: a state then holds the pictures, and the renderer,
     // rebuilt after a load, finds them there.
     cfg.v_sync = false;
+    // Vulkan's ways of handing the game's memory to the device directly all
+    // rest on the device and the machine sharing pages, which a sandbox's
+    // bridge does not give: the renderer copies what it needs instead.
+    cfg.memory_mapping = "disabled";
     cfg.show_compile_shaders = false;
     cfg.async_pipeline_compilation = false;
     cfg.shader_cache = false;

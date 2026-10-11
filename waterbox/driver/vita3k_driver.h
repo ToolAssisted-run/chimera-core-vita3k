@@ -26,6 +26,9 @@ struct Options {
     // how many times the Vita's 960x544 the GPU draws at (Vita3K's
     // resolution multiplier; its OpenGL renderer takes whole numbers)
     int resolution_scale = 1;
+    // the Vulkan renderer in place of the OpenGL one (the frame host must
+    // have a Vulkan bridge)
+    bool vulkan = false;
     // the gate's negative control: an HLE call costs the machine nothing
     // (vsched_hle_call), as before 2026-10-04
     bool free_hle_calls = false;

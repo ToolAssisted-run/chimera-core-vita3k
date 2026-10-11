@@ -28,6 +28,8 @@ size: about 150k lines without the Qt GUI and Android, 45 blocking wait sites,
 Risks: the GL rebuild after a state load (RPCS3 #43, #128, #152, #153), speed
 with every guest thread on one host core, and the GL backend falling behind
 Vulkan upstream.
+(2026-10-11: the Vulkan renderer is a second choice of the Renderer setting;
+"The Vulkan renderer", below.)
 
 ## Milestones
 
@@ -629,6 +631,130 @@ nothing, and a game that mixes with NGS has no sound. It is a setting of the
 machine - what a game hears back from the library shapes its timing - so a
 project carries it. The gate runs the same script with it off: the same
 frames, one audio digest in the whole run, native and sandbox alike.
+
+### The Vulkan renderer (user-decided, 2026-10-11, chimera#248)
+
+The owner decided that every core whose emulator has a Vulkan renderer
+offers it, beside what it already offers. Here that is a second value of the
+Renderer setting, `vulkan-hw`; `opengl-hw` stays the default. Chimera hands a
+core that exports `SetVulkanBridge` miniBox's Vulkan bridge as well as the GL
+one whenever the setting's value ends in `-hw`, and the core uses the one the
+setting names.
+
+Vita3K's Vulkan renderer was already compiled into the guest. Three things
+kept it from running in a core.
+
+**It expects a window** (patch 0012). There is no surface and no swapchain
+through the bridge. The screen renderer draws into an image of its own,
+copies it to a mapped buffer when the frame is presented, and hands the
+bytes to the frame host (`FrameHost::present_pixels`), which is where the
+frontend's picture comes from. The loader is whatever the frame host says it
+is (`vulkan_get_instance_proc_addr`): the bridge's wrappers in the sandbox,
+the same wrappers over the computer's own loader natively. FSR is off (it
+needs the swapchain image as a storage image). `State::should_display` is
+given a value: it had none, and the core's render loop reads it.
+
+**It expects mapped memory to follow the GPU by itself.** Through the bridge
+no memory type does: what is written through a mapping reaches the device
+when it is flushed, and what the device wrote is seen after an invalidate.
+`vkutil::Buffer::wrote()` and `will_read()` say so at each place the
+renderer writes or reads a mapping. The mapped buffers also ask for cached
+memory instead of the write-combined kind upstream prefers: a mapping is a
+copy on the guest's side, read once when it is made and again at every
+invalidate, and from write-combined memory that read took 25 ms a picture on
+a GTX 1060 (ten frames a second on ThreadTest; with cached memory, 300 frames
+in 3.7 s). Vita3K's memory mapping setting is "disabled": every method it
+has imports the machine's memory into the GPU by address, which nothing in a
+sandbox can offer.
+
+**It keeps everything on the GPU, and a load takes the GPU away** (patch
+0013). A loaded state is a new Vulkan device: the host destroyed the old one
+with everything made on it.
+
+- The rebuild. The renderer compares the bridge's context id with the one
+  its objects were made in, where the GL renderer does (before every command
+  list, before every present), and also after the wait for a sync object,
+  which is in the middle of a command list, and before the loading picture a
+  game with a background shows. When the id moved it tells the frame host
+  (`vulkan_context_lost`), lets go of every object with its ordinary cleanup
+  code, and then runs `create` and `late_init` again and makes each
+  context's and render target's objects again. While it lets go, the driver's
+  side stops calls crossing (`wbx-entry.cpp`: every command answers "done" at
+  once), so the cleanup frees what each object kept on this side and nothing
+  is asked of a device that is gone.
+- Upstream's cleanup followed by its init was not a clean start in four
+  places, each found by a crash or a wrong picture: the image a picture read
+  from memory is copied into (made again only when its size changed, and a
+  new image has no size of its own), the texture staging buffers (their
+  size outlived them, so the next texture was copied to where the old
+  buffer had been), the shared texture cache's two lookups (they kept
+  pointers into queues that init makes again - a write through one landed on
+  the allocator's own lock, and the machine stopped with every thread
+  waiting), and the physical device (`create` asks "is there one yet").
+- The pictures. Upstream's Vulkan renderer writes a finished scene to the
+  machine's memory only with memory mapping. In a core every scene is waited
+  for when it is submitted, its surface copied to a buffer of its own and
+  written to memory (`chimera_scene_to_memory`) - the same bytes upstream's
+  surface sync leaves there. So a state holds every picture, as it does with
+  OpenGL.
+- Because every scene is finished before the next is recorded, the six ring
+  buffers hold one scene and not three frames: 62 MiB in all against
+  upstream's 304. That matters because a mapping is guest memory: in every
+  state, and read at every load. A scene that asked for more than a buffer
+  holds would draw from data it had overwritten itself, so the most a scene
+  asks for is measured and logged, and past the buffer's size it is an error
+  in the log. The most seen: 766 KiB of vertices (Alien Breed's logos).
+
+Measured on Mesa's lavapipe (Vulkan on the processor), 2026-10-11:
+
+- The six apps that draw are the same native and sandboxed in every frame,
+  and the machine (time, thread switches, sound) is the same as with OpenGL.
+  The pictures match OpenGL's but for edges: ThreadTest exactly, ResTest in
+  all but 296 of 522,240 pixels.
+- ThreadTest with a state saved and loaded before every frame prints what
+  one native run prints (100 rebuilds in 100 frames; 67 s, OpenGL 75 s);
+  saved at frame 150 and carried on in another process likewise. Without the
+  write to memory 9 of 10 pictures differ.
+- Fruit Ninja, 3000 frames played from the gate's script: native equals
+  sandbox, the machine equals the OpenGL run's, a state saved at frame 1500
+  and loaded in a new process gives the same 150 lines to the end, and 900
+  frames with a load before each give the same 90 lines as one run. A state
+  is 673 MiB against 463 with OpenGL (below). Geometry Wars 3 (4200 frames)
+  and Alien Breed (600) keep the same time, switches and sound as with
+  OpenGL; their pictures were not compared.
+- Internal Resolution works as with OpenGL: 2x and 4x are drawn finer, and
+  after a load the next picture comes from memory at 1x.
+
+Measured on a GeForce GTX 1060 (Windows, driver 581.42, Vulkan 1.4.312)
+through chimera-run.exe, 2026-10-12:
+
+- ResTest: Vulkan and OpenGL differ in 303 pixels, as on the processor.
+- Fruit Ninja, 1500 frames on its menu: 17.2 s with Vulkan, 17.1 s with
+  OpenGL; the pictures at frames 900 and 1450 are the same in every pixel.
+  A state saved at frame 1000 and loaded in a new process shows, 450 frames
+  on, the picture the unbroken run shows, byte for byte.
+- ThreadTest with a state loaded before each of 300 frames: frames 100 and
+  290 are the unbroken run's pictures. It took 178 s against OpenGL's 68 s:
+  0.6 s a load. A third of that is the driver making a new device
+  (185 ms each time) and a tenth is the bridge copying freshly mapped
+  memory to the guest; both are the bridge's to improve (said to its
+  author), not this core's.
+
+What it does not cover:
+
+- A load is slower with Vulkan than with OpenGL on a real card (above),
+  and a state is bigger (Fruit Ninja at frame 1500: 673 MiB against 463).
+  The allocator Vita3K uses maps memory a whole block at a time, and every
+  mapped byte is a byte of the machine through the bridge, whether a buffer
+  uses it or not. Smaller blocks would shrink both; not tried.
+- Visibility tests. Without memory mapping Vita3K's GXM passes none on to
+  the renderer, with either renderer; a game that culls by them draws
+  everything.
+- The two renderers do not round every edge alike, so a movie's pictures
+  match only with the renderer it was made with. The machine is the same
+  with both.
+- No game was played to its end with Vulkan, and only Fruit Ninja was
+  compared picture by picture.
 
 ## Open questions
 

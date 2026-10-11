@@ -58,6 +58,10 @@ Toolchains:
   both flavours draw through the GPU bridge on an EGL context. In CI that is
   Mesa's llvmpipe (the workflow's comment on the package line says so).
   Needed to run the gate, not to build.
+- **A Vulkan driver**, for the Vulkan renderer's checks only: any will do,
+  and Mesa's lavapipe (`mesa-vulkan-drivers`, with `libvulkan1`) draws on the
+  processor, which is what CI uses. Without one those checks say `SKIP` and
+  the rest of the gate runs.
 - **git**, for the clone and the submodules.
 
 What the build fetches or builds by itself. The network is needed for these
@@ -279,7 +283,8 @@ a package copied in while Chimera runs is found without a restart.
 
 The same package file works on Linux and on Windows: the guest inside it is
 run by miniBox on either. This core draws on the machine's GPU, so it needs a
-machine that can give Chimera an OpenGL context.
+machine that can give Chimera an OpenGL context - or Vulkan, with the
+Renderer setting on `vulkan-hw`.
 
 Published packages are on this repository's Releases page. CI publishes a
 rolling `dev` release on every green push to main, and a dated
@@ -405,9 +410,12 @@ Nothing below is in this repository or in the package. The user provides it.
 The package carries no Sony firmware, no fonts and no game. A game's licence
 is its owner's: never put one in a repository, a log or a document.
 
-The Renderer setting has one value, `opengl-hw`: Vita3K's OpenGL renderer on
-the host's GPU through Chimera's GPU bridge. Handed no GPU, the core refuses
-to start and says why.
+The Renderer setting has two values. `opengl-hw` is Vita3K's OpenGL renderer
+on the host's GPU through Chimera's GPU bridge, and the default. `vulkan-hw`
+is its Vulkan renderer through Chimera's Vulkan bridge; it needs a Chimera
+that has that bridge (the engine got it on 2026-10-10, commit edc858b) and a
+Vulkan driver on the computer. Handed no GPU, or asked for Vulkan and handed none, the core
+refuses to start and says why.
 
 ## Troubleshooting
 

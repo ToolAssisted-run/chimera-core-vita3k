@@ -3,6 +3,7 @@
 #include "bridge_frame.h"
 
 #include "gl-bridge.h"
+#include "vk-bridge.h"
 
 #include <cstring>
 
@@ -34,6 +35,8 @@ F gl(const char *name) {
 
 } // namespace
 
+extern "C" void chimera_vulkan_quiet(bool quiet);
+
 namespace chimera_vita3k {
 
 BridgeFrame::BridgeFrame(int width_, int height_)
@@ -51,6 +54,25 @@ bool BridgeFrame::resize(int width_, int height_) {
 
 void *BridgeFrame::get_proc_address(const char *name) const {
     return chimera_gl_lookup(name);
+}
+
+// The bridge's own vkGetInstanceProcAddr: every Vulkan function the renderer
+// then asks for by name is one of the bridge's wrappers, or null.
+void *BridgeFrame::vulkan_get_instance_proc_addr() const {
+    return vulkan ? chimera_vk_lookup("vkGetInstanceProcAddr") : nullptr;
+}
+
+// The Vulkan renderer's present: the picture as it read it back, top row
+// first already.
+void BridgeFrame::present_pixels(const uint8_t *bgra, int width_, int height_) {
+    if (!readback || !bgra || width_ != width || height_ != height)
+        return;
+    latest.assign(bgra, bgra + static_cast<size_t>(width) * height * 4);
+    // opaque, as the OpenGL renderer's picture is: the same picture is then
+    // the same bytes whichever renderer drew it
+    for (size_t i = 3; i < latest.size(); i += 4)
+        latest[i] = 0xFF;
+    count++;
 }
 
 // Made on first use, on whichever thread holds the context then.
@@ -84,13 +106,15 @@ void BridgeFrame::prepare_for_render_thread() {
 // the host says which context the calls land on: it moves when a state is
 // loaded (a fresh one in another process, a new id in the same one)
 uint64_t BridgeFrame::context_id() const {
-    return chimera_gl_context_id();
+    return vulkan ? chimera_vk_context_id() : chimera_gl_context_id();
 }
 
 // The renderer dropped everything it remembered: the framebuffer goes too,
 // in the same breath, before any new name is made (renderer.cpp,
 // chimera_rebuild), and default_fbo makes it again.
 void BridgeFrame::lost_context() {
+    if (vulkan)
+        return;
     if (fbo)
         gl<PFN_DeleteFramebuffers>("glDeleteFramebuffers")(1, &fbo);
     if (color_rb)
@@ -99,8 +123,24 @@ void BridgeFrame::lost_context() {
     color_rb = 0;
 }
 
+// Vulkan after a load. true: what the renderer remembers is a context that
+// no longer exists, and until false is said its calls go nowhere (wbx-entry,
+// chimera_vulkan_quiet). false: it has let go of everything; the copies of
+// mapped memory that nothing will unmap now are given back, and the calls
+// cross again.
+void BridgeFrame::vulkan_context_lost(bool lost) {
+    if (!vulkan)
+        return;
+    if (lost) {
+        chimera_vulkan_quiet(true);
+    } else {
+        chimera_vk_forget_mappings();
+        chimera_vulkan_quiet(false);
+    }
+}
+
 void BridgeFrame::swap_buffers() {
-    if (!readback)
+    if (!readback || vulkan)
         return;
     const size_t stride = static_cast<size_t>(width) * 4;
     rows.resize(stride * height);

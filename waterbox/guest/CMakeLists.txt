@@ -24,9 +24,17 @@ add_library(vita3k-guest-core STATIC
 	${GEN}/gl-bridge-guest.cpp
 )
 target_include_directories(vita3k-guest-core PRIVATE ${CMAKE_SOURCE_DIR}/vita3k ${W}/driver
-	${MB}/source/gl ${GEN} ${MB}/extern/emulibc ${MB}/source/guest/include)
+	${MB}/source/gl ${GEN} ${MB}/source/vk ${MB}/extern/emulibc ${MB}/source/guest/include)
+
+# The Vulkan bridge's guest half (miniBox, source/vk): the vk* wrappers the
+# Vulkan renderer is given in place of a loader. Its own archive, built with
+# the Vulkan headers the bridge was generated from, not Vita3K's.
+set(GENVK ${W}/../build/generated-vk)
+add_library(chimera-vkbridge STATIC ${MB}/source/vk/vk-guest.c ${GENVK}/vk-bridge-guest.c)
+target_include_directories(chimera-vkbridge PRIVATE ${MB}/source/vk ${GENVK} ${MB}/extern/vulkan-headers/include
+	${MB}/extern/emulibc ${MB}/source/guest/include)
 # the generated wrappers want glad 2's types: built apart from Vita3K's glad
 set_source_files_properties(${GEN}/gl-bridge-guest.cpp PROPERTIES INCLUDE_DIRECTORIES "${W}/glad/include;${GEN};${MB}/source/gl")
 target_link_libraries(vita3k-guest-core PUBLIC
 	app audio compat config cppcommon ctrl dialog display ime lang gdbstub gxm io miniz
-	modules motion packages patch renderer shader touch util psvpfsparser pugixml::pugixml)
+	modules motion packages patch renderer shader touch util psvpfsparser pugixml::pugixml chimera-vkbridge)

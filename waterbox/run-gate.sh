@@ -642,4 +642,169 @@ else
 	fail "threadtest without surface sync survives a load before every frame (exit $r): the state legs cannot see a lost picture"
 fi
 
+# The Vulkan renderer (the Renderer setting's "vulkan-hw"), drawing through
+# miniBox's Vulkan bridge. It needs a Vulkan driver on this computer - one
+# that draws on the processor will do (Mesa's lavapipe) - and these checks
+# SKIP, saying so, on a computer that has none.
+vk="--renderer vulkan-hw"
+r=$(native vk-probe hello_world.vpk 5 $vk)
+if [ "$r" != 0 ] && grep -q "no Vulkan was handed over" "$work/vk-probe.err"; then
+	skip "the Vulkan renderer: this computer offers no Vulkan - $(grep -m1 '^vulkan bridge:' "$work/vk-probe.err" | cut -c16-)"
+else
+	# Every app that draws: the sandbox the same as the native run in every
+	# frame, and the machine (time, thread switches, sound) the same as with
+	# OpenGL - only the pictures are the renderer's to decide.
+	bad=""; shown=0
+	for app in hello_world debugscreen ctrl_sample sdl2_redrectangle threadtest restest; do
+		frames=300; [ "$app" = restest ] && frames=120
+		rn=$(native "$app-vk" "$app.vpk" "$frames" $vk)
+		rw=$(sandboxed "$app-vk-wbx" "$app.vpk" "$frames" $vk)
+		sed 's/ video=[0-9a-f]*//' "$work/$app-a.out" >"$work/$app-machine.gl"
+		sed 's/ video=[0-9a-f]*//' "$work/$app-vk.out" >"$work/$app-machine.vk"
+		if [ "$rn" != 0 ] || [ "$rw" != 0 ]; then bad="$bad $app(exit $rn, $rw)"
+		elif ! cmp -s "$work/$app-vk.out" "$work/$app-vk-wbx.out"; then bad="$bad $app(native and sandbox differ)"
+		elif ! cmp -s "$work/$app-machine.gl" "$work/$app-machine.vk"; then bad="$bad $app(the machine differs from the OpenGL run)"
+		else shown=$((shown + $(pictures "$app-vk")))
+		fi
+	done
+	if [ -n "$bad" ]; then
+		fail "Vulkan:$bad (build/gate/<app>-vk.err)"
+	else
+		pass "Vulkan: six apps, native == sandbox in every frame and the same machine as with OpenGL; $shown different pictures"
+	fi
+
+	# The pictures themselves: the same as OpenGL's but for a few pixels on
+	# the edges of what is drawn, which the two do not round alike. A
+	# different picture is told apart (another frame of the same app).
+	native restest-gl-shot restest.vpk 120 --screenshot 100="$work/restest-gl.tga" >/dev/null
+	native restest-vk-shot restest.vpk 120 $vk --screenshot 100="$work/restest-vk.tga" >/dev/null
+	native threadtest-gl-shot threadtest.vpk 200 --screenshot 100="$work/threadtest-gl.tga" >/dev/null
+	native threadtest-vk-shot threadtest.vpk 200 $vk --screenshot 100="$work/threadtest-vk.tga" --screenshot 190="$work/threadtest-vk-later.tga" >/dev/null
+	v1=$(python3 "$here/tests/check-same-picture.py" "$work/restest-gl.tga" "$work/restest-vk.tga" 2>&1); c1=$?
+	v2=$(python3 "$here/tests/check-same-picture.py" "$work/threadtest-gl.tga" "$work/threadtest-vk.tga" 2>&1); c2=$?
+	v3=$(python3 "$here/tests/check-same-picture.py" "$work/threadtest-gl.tga" "$work/threadtest-vk-later.tga" 2>&1); c3=$?
+	if [ "$c1" = 0 ] && [ "$c2" = 0 ] && [ "$c3" = 1 ]; then
+		pass "Vulkan draws what OpenGL draws: restest ${v1%% (*}, threadtest ${v2%% (*}; another frame is told apart (${v3%% (*})"
+	else
+		fail "Vulkan's pictures against OpenGL's: restest - $v1; threadtest - $v2; another frame (must differ) - $v3"
+	fi
+
+	# Internal Resolution with Vulkan: drawn finer, not stretched, and the
+	# sandbox the same as the native run.
+	r1=$(native restest-vk-1x restest.vpk 120 $vk --screenshot 100="$work/restest-vk-1x.tga")
+	r2=$(native restest-vk-2x restest.vpk 120 $vk --internal-resolution 2x --screenshot 100="$work/restest-vk-2x.tga")
+	rw=$(sandboxed restest-vk-2x-wbx restest.vpk 120 $vk --internal-resolution 2x)
+	verdict=$(python3 "$here/tests/check-resolution.py" "$work/restest-vk-1x.tga" "$work/restest-vk-2x.tga" 2 2>&1); v2=$?
+	if [ "$r1" != 0 ] || [ "$r2" != 0 ] || [ "$rw" != 0 ]; then
+		fail "Vulkan: Internal Resolution - a run failed (exit $r1, $r2, sandbox $rw; build/gate/restest-vk-2x.err)"
+	elif [ "$v2" != 0 ]; then
+		fail "Vulkan: Internal Resolution 2x is not a finer picture - $verdict"
+	elif ! cmp -s "$work/restest-vk-2x.out" "$work/restest-vk-2x-wbx.out"; then
+		fail "Vulkan: Internal Resolution 2x, native and sandbox differ - $(diff "$work/restest-vk-2x.out" "$work/restest-vk-2x-wbx.out" | sed -n 2p)"
+	else
+		pass "Vulkan: Internal Resolution 2x draws finer - ${verdict%%:*}; native == sandbox"
+	fi
+
+	# States. A load is a new Vulkan device: the renderer lets go of every
+	# object it had and makes them all again, and what the GPU had drawn is
+	# in the machine's memory, where every finished scene is written.
+	grep '^frame' "$work/threadtest-vk.out" | head -10 >"$work/threadtest-vk-rerecord.want"
+	r=$(sandboxed threadtest-vk-rerecord threadtest.vpk 100 $vk --rerecord)
+	grep '^frame' "$work/threadtest-vk-rerecord.out" >"$work/threadtest-vk-rerecord.got"
+	rebuilds=$(grep -c 'rebuilding every Vulkan object' "$work/threadtest-vk-rerecord-work/vita3k.log" 2>/dev/null)
+	if [ "$r" != 0 ]; then
+		fail "Vulkan: threadtest with a state saved and loaded before every frame failed (exit $r; build/gate/threadtest-vk-rerecord.err)"
+	elif ! cmp -s "$work/threadtest-vk-rerecord.want" "$work/threadtest-vk-rerecord.got"; then
+		fail "Vulkan: threadtest, a state saved and loaded before every frame, differs from the native run - $(diff "$work/threadtest-vk-rerecord.want" "$work/threadtest-vk-rerecord.got" | sed -n 2p)"
+	elif [ "${rebuilds:-0}" -lt 100 ]; then
+		fail "Vulkan: 100 loads and the renderer was made again ${rebuilds:-0} times: the loads did not reach it"
+	else
+		pass "Vulkan: threadtest with a state saved and loaded before every frame == the native run, the renderer made again $rebuilds times in 100 frames"
+	fi
+
+	state="$work/threadtest-vk-150.state"
+	ra=$(sandboxed threadtest-vk-save threadtest.vpk 150 $vk --save-state "$state")
+	rb=$(sandboxed threadtest-vk-load threadtest.vpk 150 $vk --state "$state")
+	{ grep '^frame' "$work/threadtest-vk-save.out"; grep -v '^loaded' "$work/threadtest-vk-load.out"; } | sed "$whole" >"$work/threadtest-vk-joined.out"
+	sed "$whole" "$work/threadtest-vk.out" >"$work/threadtest-vk-one.out"
+	if [ "$ra" != 0 ] || [ "$rb" != 0 ]; then
+		fail "Vulkan: threadtest saved at frame 150 and carried on in another process failed (exit $ra, $rb)"
+	elif ! cmp -s "$work/threadtest-vk-one.out" "$work/threadtest-vk-joined.out"; then
+		fail "Vulkan: threadtest carried on from a state in another process differs from one run - $(diff "$work/threadtest-vk-one.out" "$work/threadtest-vk-joined.out" | sed -n 2p)"
+	else
+		pass "Vulkan: threadtest saved at frame 150 and carried on in another process == one native run; the state is $(($(wc -c <"$state") >> 20)) MiB"
+	fi
+	rm -f "$state"
+
+	r=$(sandboxed threadtest-vk-nosync threadtest.vpk 100 $vk --rerecord --no-surface-sync)
+	grep '^frame' "$work/threadtest-vk-nosync.out" >"$work/threadtest-vk-nosync.got"
+	if [ "$r" = 0 ] && ! cmp -s "$work/threadtest-vk-rerecord.want" "$work/threadtest-vk-nosync.got"; then
+		pass "Vulkan: a state holds the pictures only because every scene is written to memory - without that, $(diff "$work/threadtest-vk-rerecord.want" "$work/threadtest-vk-nosync.got" | grep -c '^>') of 10 pictures differ"
+	else
+		fail "Vulkan: threadtest without the write to memory survives a load before every frame (exit $r): the state checks cannot see a lost picture"
+	fi
+
+	# Nothing the core asked of the bridge was refused, in any run above: a
+	# refused command is one sent with an object of a device that is gone.
+	refused=$(grep -l 'calls were refused' "$work"/*-vk*.err 2>/dev/null | wc -l)
+	if [ "$refused" = 0 ]; then
+		pass "Vulkan: no command was refused by the bridge in any of these runs"
+	else
+		fail "Vulkan: the bridge refused commands in $refused runs - $(grep -h 'calls were refused' "$work"/*-vk*.err | head -1)"
+	fi
+
+	# The package through Chimera's own engine, with the setting as a project
+	# gives it. An engine older than the Vulkan bridge hands none over.
+	if [ -x "$engine" ] && [ -f "$pkg" ]; then
+		rm -rf "$work/engine-vk-sd"
+		"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --gpu --settings '{"renderer":"vulkan-hw"}' \
+			--export-savedata "$work/engine-vk-sd" >"$work/engine-vk.out" 2>&1
+		r=$?
+		if [ "$r" != 0 ] && grep -q "no Vulkan was handed over" "$work/engine-vk.out"; then
+			skip "Vulkan in chimera-run: this engine handed no Vulkan over"
+		elif [ "$r" = 0 ] && grep -q '^frames=300' "$work/engine-vk.out" && python3 "$oracle" check "$script" "$work/engine-vk-sd/data/inputtest/input.txt" >/dev/null; then
+			pass "Vulkan in chimera-run: 300 frames of a movie with the renderer setting vulkan-hw, the input read as predicted"
+		else
+			fail "Vulkan in chimera-run (exit $r); see build/gate/engine-vk.out"
+		fi
+	else
+		skip "Vulkan in chimera-run: no $engine or package"
+	fi
+
+	# A game, where it is: the sandbox the same as the native run, the
+	# machine the same as with OpenGL, and a state saved in one process and
+	# carried on in another the same as one run.
+	game="$content/fruit-ninja.zip"
+	if [ -f "$game" ] && [ -f "$fonts" ] && [ -f "$sysw_two" ] && [ -f "$work/fruit-n.out" ]; then
+		arcade="--input $here/tests/fruit-ninja-arcade.txt"
+		(native fruit-vk-n "$game" 3000 $both_pups $arcade $vk >"$work/fruit-vk-n.rc") &
+		rw=$(sandboxed fruit-vk-w "$game" 3000 $both_pups $arcade $vk)
+		wait
+		rn=$(cat "$work/fruit-vk-n.rc")
+		sed 's/ video=[0-9a-f]*//' "$work/fruit-n.out" >"$work/fruit-machine.gl"
+		sed 's/ video=[0-9a-f]*//' "$work/fruit-vk-n.out" >"$work/fruit-machine.vk"
+		state="$work/fruit-vk-1500.state"
+		ra=$(sandboxed fruit-vk-save "$game" 1500 $both_pups $arcade $vk --save-state "$state")
+		rb=$(sandboxed fruit-vk-load "$game" 1500 $both_pups $arcade $vk --state "$state")
+		{ grep '^frame' "$work/fruit-vk-save.out"; grep -v '^loaded' "$work/fruit-vk-load.out"; } | sed "$whole" >"$work/fruit-vk-joined.out"
+		sed "$whole" "$work/fruit-vk-n.out" >"$work/fruit-vk-one.out"
+		if [ "$rn" != 0 ] || [ "$rw" != 0 ] || [ "$ra" != 0 ] || [ "$rb" != 0 ]; then
+			fail "Vulkan: Fruit Ninja failed (exit $rn native, $rw sandbox, $ra saving, $rb carrying on; build/gate/fruit-vk-*.err)"
+		elif ! cmp -s "$work/fruit-vk-n.out" "$work/fruit-vk-w.out"; then
+			fail "Vulkan: Fruit Ninja, native and sandbox differ - $(diff "$work/fruit-vk-n.out" "$work/fruit-vk-w.out" | sed -n 2p)"
+		elif ! cmp -s "$work/fruit-machine.gl" "$work/fruit-machine.vk"; then
+			fail "Vulkan: Fruit Ninja's machine differs from the OpenGL run - $(diff "$work/fruit-machine.gl" "$work/fruit-machine.vk" | sed -n 2p)"
+		elif ! cmp -s "$work/fruit-vk-one.out" "$work/fruit-vk-joined.out"; then
+			fail "Vulkan: Fruit Ninja carried on from a state in another process differs from one run - $(diff "$work/fruit-vk-one.out" "$work/fruit-vk-joined.out" | sed -n 2p)"
+		elif grep -q 'calls were refused' "$work"/fruit-vk-*.err; then
+			fail "Vulkan: the bridge refused commands in a Fruit Ninja run - $(grep -h 'calls were refused' "$work"/fruit-vk-*.err | head -1)"
+		else
+			pass "Vulkan: Fruit Ninja, 3000 frames played - native == sandbox, the same machine as with OpenGL, and saved at frame 1500 and carried on in another process == one run (the state is $(($(wc -c <"$state") >> 20)) MiB)"
+		fi
+		rm -f "$state"
+	else
+		skip "Vulkan: Fruit Ninja - not in $content, or its OpenGL run above did not happen"
+	fi
+fi
+
 exit "$fails"

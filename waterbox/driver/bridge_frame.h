@@ -32,11 +32,17 @@ public:
     // false: a present is not read back and the picture stands (turbo)
     bool readback = true;
 
+    // true: the renderer is Vulkan's, through the Vulkan bridge. The picture
+    // then arrives by present_pixels and nothing of OpenGL is touched.
+    bool vulkan = false;
+
     renderer::DisplayHandle handle() const override { return {}; }
     int drawable_width() const override { return width; }
     int drawable_height() const override { return height; }
     std::vector<std::string> font_dirs() const override { return {}; }
     void *get_proc_address(const char *name) const override;
+    void *vulkan_get_instance_proc_addr() const override;
+    void present_pixels(const uint8_t *bgra, int width, int height) override;
     unsigned int default_fbo() const override;
     bool make_current() override;
     void done_current() override;
@@ -44,6 +50,7 @@ public:
     void prepare_for_render_thread() override;
     uint64_t context_id() const override;
     void lost_context() override;
+    void vulkan_context_lost(bool lost) override;
 
     // the newest presented picture, BGRA top row first; empty before the
     // first present

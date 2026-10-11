@@ -1,0 +1,486 @@
+diff --git a/vita3k/renderer/include/renderer/frame_host.h b/vita3k/renderer/include/renderer/frame_host.h
+--- a/vita3k/renderer/include/renderer/frame_host.h
++++ b/vita3k/renderer/include/renderer/frame_host.h
+@@ -72,6 +72,20 @@
+         return 0;
+     }
+ 
++    // chimera: Vulkan without a window. The first is where the loader's
++    // vkGetInstanceProcAddr is (null: this host offers no Vulkan); the second
++    // is handed every finished picture, BGRA with the top row first, since
++    // there is no swapchain to present it to.
++    virtual void *vulkan_get_instance_proc_addr() const {
++        return nullptr;
++    }
++
++    virtual void present_pixels(const uint8_t *bgra, int width, int height) {
++        (void)bgra;
++        (void)width;
++        (void)height;
++    }
++
+     virtual bool make_current() {
+         return false;
+     }
+diff --git a/vita3k/renderer/include/renderer/state.h b/vita3k/renderer/include/renderer/state.h
+--- a/vita3k/renderer/include/renderer/state.h
++++ b/vita3k/renderer/include/renderer/state.h
+@@ -119,7 +119,10 @@
+     uint32_t shaders_count_compiled = 0;
+     uint32_t programs_count_pre_compiled = 0;
+ 
+-    bool should_display;
++    // chimera: starts false. The OpenGL renderer set it when it was made;
++    // the Vulkan one only when it drew a frame, and the core's render loop
++    // reads it before the first frame.
++    bool should_display = false;
+ 
+     std::atomic<bool> async_flip_requested{ false };
+     std::atomic<int> pending_vsync{ -1 };
+diff --git a/vita3k/renderer/include/renderer/vulkan/screen_renderer.h b/vita3k/renderer/include/renderer/vulkan/screen_renderer.h
+--- a/vita3k/renderer/include/renderer/vulkan/screen_renderer.h
++++ b/vita3k/renderer/include/renderer/vulkan/screen_renderer.h
+@@ -45,6 +45,14 @@
+     vk::SurfaceFormatKHR surface_format;
+     vk::PresentModeKHR present_mode{};
+     vk::Extent2D extent;
++#ifdef CHIMERA
++    // chimera: what stands in for the swapchain's one image, and the buffer
++    // it is read back into at every present
++    vkutil::Image chimera_picture;
++    vk::Buffer chimera_readback;
++    vma::Allocation chimera_readback_alloc;
++    vma::AllocationInfo chimera_readback_info;
++#endif
+     uint32_t swapchain_size{};
+     std::vector<vk::Image> swapchain_images;
+     std::vector<vk::ImageView> swapchain_views;
+diff --git a/vita3k/renderer/src/vulkan/overlay_renderer.cpp b/vita3k/renderer/src/vulkan/overlay_renderer.cpp
+--- a/vita3k/renderer/src/vulkan/overlay_renderer.cpp
++++ b/vita3k/renderer/src/vulkan/overlay_renderer.cpp
+@@ -115,6 +115,7 @@
+         vkutil::Buffer staging(4);
+         staging.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc);
+         memcpy(staging.mapped_data, &white_pixel, 4);
++        staging.wrote();
+ 
+         vk::BufferImageCopy region{
+             .bufferOffset = 0,
+@@ -187,6 +188,7 @@
+         vkutil::Buffer staging(4);
+         staging.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc);
+         memcpy(staging.mapped_data, &white_pixel, 4);
++        staging.wrote();
+ 
+         vk::BufferImageCopy region{
+             .bufferOffset = 0,
+@@ -517,6 +519,7 @@
+     vkutil::Buffer staging(total_size);
+     staging.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc);
+     memcpy(staging.mapped_data, glyph_data.data(), total_size);
++    staging.wrote();
+ 
+     vk::ImageSubresourceRange range{
+         .aspectMask = vk::ImageAspectFlagBits::eColor,
+@@ -623,6 +626,7 @@
+     vkutil::Buffer staging(data_size);
+     staging.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc);
+     memcpy(staging.mapped_data, img->get_data(), data_size);
++    staging.wrote();
+ 
+     vk::ImageSubresourceRange all_mips{
+         .aspectMask = vk::ImageAspectFlagBits::eColor,
+@@ -788,6 +792,7 @@
+ 
+     memcpy(static_cast<uint8_t *>(vb.mapped_data) + m_vertex_buffer_offset,
+         draw_cmd.verts.data(), data_size);
++    vb.wrote(m_vertex_buffer_offset, data_size);
+     const vk::DeviceSize this_offset = m_vertex_buffer_offset;
+     m_vertex_buffer_offset += aligned_size;
+ 
+diff --git a/vita3k/renderer/src/vulkan/renderer.cpp b/vita3k/renderer/src/vulkan/renderer.cpp
+--- a/vita3k/renderer/src/vulkan/renderer.cpp
++++ b/vita3k/renderer/src/vulkan/renderer.cpp
+@@ -143,7 +143,11 @@
+ }
+ 
+ const static std::vector<const char *> required_device_extensions = {
++#ifndef CHIMERA
++    // chimera: a core has no window. The picture is drawn to an image of the
++    // renderer's own and read back (ScreenRenderer), so no swapchain.
+     vk::KHRSwapchainExtensionName,
++#endif
+     // needed in order to use storage buffers
+     vk::KHRStorageBufferStorageClassExtensionName,
+     // needed in order to use negative viewport height
+@@ -294,7 +298,10 @@
+ #ifndef __ANDROID__
+             && (queue_family.queueFlags & vk::QueueFlagBits::eTransfer)
+ #endif
+-            && vk_state.physical_device.getSurfaceSupportKHR(i, vk_state.screen_renderer.surface)) {
++#ifndef CHIMERA
++            && vk_state.physical_device.getSurfaceSupportKHR(i, vk_state.screen_renderer.surface)
++#endif
++        ) {
+             vk::DeviceQueueCreateInfo queue_create_info{
+                 .queueFamilyIndex = i,
+                 .queueCount = queue_family.queueCount,
+@@ -378,6 +385,17 @@
+ 
+         if (!detect_patch_bcn(&texture_cache.support_dxt))
+             return false;
++#elif defined(CHIMERA)
++        // chimera: the loader is whatever the frame host says it is - the
++        // machine's own natively, the sandbox's bridge in a core. Nothing is
++        // looked for on the computer from in here.
++        auto vk_get_instance_proc_addr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
++            this->renderer::State::frame->vulkan_get_instance_proc_addr());
++        if (!vk_get_instance_proc_addr) {
++            LOG_ERROR("The frame host offers no Vulkan.");
++            return false;
++        }
++        VULKAN_HPP_DEFAULT_DISPATCHER.init(vk_get_instance_proc_addr);
+ #else
+         VULKAN_HPP_DEFAULT_DISPATCHER.init();
+ #endif
+@@ -392,8 +410,13 @@
+ 
+         std::vector<const char *> instance_extensions;
+         instance_extensions.reserve(8);
++#ifdef CHIMERA
++        // chimera: no window, so no surface extension of any kind
++#else
+         instance_extensions.push_back(vk::KHRSurfaceExtensionName);
+-#ifdef _WIN32
++#endif
++#ifdef CHIMERA
++#elif defined(_WIN32)
+         instance_extensions.push_back(vk::KHRWin32SurfaceExtensionName);
+ #elif defined(__APPLE__)
+         instance_extensions.push_back(vk::EXTMetalSurfaceExtensionName);
+@@ -598,11 +621,13 @@
+             return false;
+         }
+ 
++#ifndef CHIMERA
+         if (!physical_device.getSurfaceSupportKHR(
+                 general_family_index, screen_renderer.surface)) {
+             LOG_ERROR("Failed to select a Vulkan queue that supports presentation. This is likely a bug.");
+             return false;
+         }
++#endif
+ 
+         // use these features (because they are used by the vita GPU) if they are available
+         vk::PhysicalDeviceFeatures enabled_features{
+@@ -913,7 +938,13 @@
+         LOG_WARN("Failed to initialize Vulkan overlay renderer, overlays will be disabled");
+     }
+ 
++#ifdef CHIMERA
++    // chimera: the picture's image is not a storage image, and a core offers
++    // no screen filter
++    support_fsr = false;
++#else
+     support_fsr &= static_cast<bool>(screen_renderer.surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage);
++#endif
+ 
+     return true;
+ }
+@@ -1167,6 +1198,8 @@
+             // copy surface to staging buffer
+             const vk::DeviceSize texture_data_size = frame.pitch * frame.image_size.y * 4;
+             memcpy(screen_renderer.vita_surface_staging_info.pMappedData, frame.base.get(mem), texture_data_size);
++            // chimera: the device has to be told (vkutil::Buffer::wrote says why)
++            allocator.flushAllocation(screen_renderer.vita_surface_staging_alloc, 0, texture_data_size);
+ 
+             // copy staging buffer to image
+             auto &cmd_buffer = screen_renderer.current_cmd_buffer;
+diff --git a/vita3k/renderer/src/vulkan/screen_renderer.cpp b/vita3k/renderer/src/vulkan/screen_renderer.cpp
+--- a/vita3k/renderer/src/vulkan/screen_renderer.cpp
++++ b/vita3k/renderer/src/vulkan/screen_renderer.cpp
+@@ -75,6 +75,11 @@
+ }
+ 
+ bool ScreenRenderer::create() {
++#ifdef CHIMERA
++    // chimera: a core has no window and so no surface; the picture is drawn
++    // to an image of our own (create_swapchain) and read back (swap_window)
++    return true;
++#endif
+     if (this->surface) {
+ #ifdef __ANDROID__
+         SDL_Vulkan_DestroySurface(state.instance, this->surface, nullptr);
+@@ -169,7 +174,14 @@
+ }
+ 
+ bool ScreenRenderer::setup() {
++#ifdef CHIMERA
++    // chimera: the format the picture is handed over in
++    const std::vector<vk::SurfaceFormatKHR> surface_formats = {
++        { vk::Format::eB8G8R8A8Unorm, vk::ColorSpaceKHR::eSrgbNonlinear }
++    };
++#else
+     const auto surface_formats = state.physical_device.getSurfaceFormatsKHR(surface);
++#endif
+ 
+     bool surface_format_found = false;
+ 
+@@ -209,7 +221,11 @@
+     // the only drawback for mailbox is that it draws more power, so maybe on a portable device use something else
+     // this one should always be available
+     present_mode = vk::PresentModeKHR::eImmediate;
++#ifdef CHIMERA
++    const std::vector<vk::PresentModeKHR> present_modes;
++#else
+     const auto present_modes = state.physical_device.getSurfacePresentModesKHR(surface);
++#endif
+     for (const auto &mode : present_modes) {
+         if (mode == vk::PresentModeKHR::eMailbox) {
+             present_mode = mode;
+@@ -242,6 +258,30 @@
+ }
+ 
+ void ScreenRenderer::create_swapchain() {
++#ifdef CHIMERA
++    // chimera: one image the size the frame host asks for, drawn to like a
++    // swapchain image and copied out at every present
++    {
++        auto *frame_host = static_cast<renderer::State &>(state).frame;
++        extent.width = static_cast<uint32_t>(frame_host->drawable_width());
++        extent.height = static_cast<uint32_t>(frame_host->drawable_height());
++        if (extent.width == 0 || extent.height == 0)
++            return;
++
++        swapchain_size = 1;
++        chimera_picture = vkutil::Image(extent.width, extent.height, surface_format.format);
++        chimera_picture.init_image(vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc
++            | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled);
++        swapchain_images = { chimera_picture.image };
++
++        vk::BufferCreateInfo readback_info{
++            .size = static_cast<vk::DeviceSize>(extent.width) * extent.height * sizeof(uint32_t),
++            .usage = vk::BufferUsageFlagBits::eTransferDst,
++            .sharingMode = vk::SharingMode::eExclusive
++        };
++        std::tie(chimera_readback, chimera_readback_alloc) = state.allocator.createBuffer(readback_info, vkutil::vma_mapped_alloc, chimera_readback_info);
++    }
++#else
+     surface_capabilities = state.physical_device.getSurfaceCapabilitiesKHR(surface);
+ 
+     if (surface_capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
+@@ -297,6 +337,7 @@
+     // Get Swapchain Images
+     swapchain_images = state.device.getSwapchainImagesKHR(swapchain);
+     swapchain_size = swapchain_images.size();
++#endif
+ 
+     // Get Image views
+     swapchain_views.resize(swapchain_size);
+@@ -348,10 +389,19 @@
+         state.device.destroy(view);
+     swapchain_views.clear();
+ 
++#ifdef CHIMERA
++    swapchain_images.clear();
++    chimera_picture.destroy();
++    if (chimera_readback) {
++        state.allocator.destroyBuffer(chimera_readback, chimera_readback_alloc);
++        chimera_readback = nullptr;
++    }
++#else
+     if (swapchain) {
+         state.device.destroySwapchainKHR(swapchain);
+         swapchain = nullptr;
+     }
++#endif
+ }
+ 
+ void ScreenRenderer::cleanup() {
+@@ -386,8 +436,17 @@
+         state.device.destroy(view);
+     swapchain_views.clear();
+ 
++#ifdef CHIMERA
++    swapchain_images.clear();
++    chimera_picture.destroy();
++    if (chimera_readback) {
++        state.allocator.destroyBuffer(chimera_readback, chimera_readback_alloc);
++        chimera_readback = nullptr;
++    }
++#else
+     state.device.destroy(swapchain);
+     swapchain = nullptr;
++#endif
+ 
+     for (uint32_t i = 0; i <= swapchain_size; i++) {
+         if (i != swapchain_size)
+@@ -404,7 +463,7 @@
+ 
+ #ifdef __ANDROID__
+     SDL_Vulkan_DestroySurface(state.instance, surface, nullptr);
+-#else
++#elif !defined(CHIMERA)
+     state.instance.destroy(surface);
+ #endif
+     surface = nullptr;
+@@ -432,9 +491,15 @@
+         return false;
+     }
+ 
++#ifdef CHIMERA
++    // chimera: the one image is always ours
++    swapchain_image_idx = 0;
++    acquire_result = vk::Result::eSuccess;
++#else
+     if (swapchain)
+         acquire_result = state.device.acquireNextImageKHR(swapchain,
+             next_image_timeout, image_acquired_semaphores[current_frame], vk::Fence(), &swapchain_image_idx);
++#endif
+ 
+     const bool has_acquired_image = acquire_result == vk::Result::eSuccess || acquire_result == vk::Result::eSuboptimalKHR;
+     if (!has_acquired_image) {
+@@ -538,6 +603,37 @@
+         return;
+     }
+ 
++#ifdef CHIMERA
++    // chimera: the render pass leaves the image ready to be copied from; it
++    // is copied into the mapped buffer, the queue is waited for, and the
++    // bytes are handed to the frame host. This is the whole of presenting.
++    {
++        current_cmd_buffer.endRenderPass();
++        vk::BufferImageCopy region{
++            .bufferOffset = 0,
++            .bufferRowLength = 0,
++            .bufferImageHeight = 0,
++            .imageSubresource = vkutil::color_subresource_layer,
++            .imageOffset = vk::Offset3D{ 0, 0, 0 },
++            .imageExtent = vk::Extent3D{ extent.width, extent.height, 1 }
++        };
++        current_cmd_buffer.copyImageToBuffer(swapchain_images[swapchain_image_idx], vk::ImageLayout::eTransferSrcOptimal, chimera_readback, region);
++        current_cmd_buffer.end();
++        vk::SubmitInfo submit_info{};
++        submit_info.setCommandBuffers(current_cmd_buffer);
++        state.general_queue.submit(submit_info, fences[swapchain_image_idx]);
++        if (state.device.waitForFences(fences[swapchain_image_idx], VK_TRUE, next_image_timeout) != vk::Result::eSuccess)
++            LOG_ERROR("Could not wait for the picture.");
++        // a mapping is not promised to follow the device's memory by itself
++        state.allocator.invalidateAllocation(chimera_readback_alloc, 0, VK_WHOLE_SIZE);
++        auto *frame_host = static_cast<renderer::State &>(state).frame;
++        frame_host->present_pixels(static_cast<const uint8_t *>(chimera_readback_info.pMappedData),
++            static_cast<int>(extent.width), static_cast<int>(extent.height));
++        swapchain_image_idx = ~0;
++        current_cmd_buffer = nullptr;
++        return;
++    }
++#endif
+     // first submit the command buffer
+     current_cmd_buffer.endRenderPass();
+     current_cmd_buffer.end();
+@@ -638,7 +734,12 @@
+         .stencilLoadOp = vk::AttachmentLoadOp::eDontCare,
+         .stencilStoreOp = vk::AttachmentStoreOp::eDontCare,
+         .initialLayout = vk::ImageLayout::eUndefined,
++#ifdef CHIMERA
++        // chimera: copied from after the pass, not presented
++        .finalLayout = vk::ImageLayout::eTransferSrcOptimal
++#else
+         .finalLayout = vk::ImageLayout::ePresentSrcKHR
++#endif
+     };
+     vk::AttachmentReference attachment_ref{
+         .attachment = 0,
+@@ -697,8 +798,13 @@
+     if (!window_has_drawable_size(state))
+         return false;
+ 
++#ifdef CHIMERA
++    if (!need_rebuild && !swapchain_images.empty() && surface_matches_window_size())
++        return true;
++#else
+     if (!need_rebuild && !need_surface_recreate && swapchain && surface_matches_window_size())
+         return true;
++#endif
+ 
+     if (!rebuild_swapchain_if_visible()) {
+         need_rebuild = true;
+@@ -726,7 +832,11 @@
+ #endif
+ 
+     create_swapchain();
++#ifdef CHIMERA
++    return !swapchain_images.empty();
++#else
+     return static_cast<bool>(swapchain);
++#endif
+ }
+ 
+ bool ScreenRenderer::surface_matches_window_size() {
+diff --git a/vita3k/renderer/src/vulkan/surface_cache.cpp b/vita3k/renderer/src/vulkan/surface_cache.cpp
+--- a/vita3k/renderer/src/vulkan/surface_cache.cpp
++++ b/vita3k/renderer/src/vulkan/surface_cache.cpp
+@@ -1364,6 +1364,7 @@
+ 
+         int src_stride = pixel_stride * 4;
+         int dst_stride = pixel_stride * 3;
++        surface->copy_buffer->will_read();
+         sws_scale(surface->sws_context, reinterpret_cast<const uint8_t *const *>(&surface->copy_buffer->mapped_data), &src_stride, 0, surface->original_height, &pixels, &dst_stride);
+         return;
+     }
+@@ -1492,6 +1493,7 @@
+     // this will cause a waitIdle, not an issue
+     vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+ 
++    temp_buff.will_read();
+     memcpy(frame.data(), temp_buff.mapped_data, frame.size() * 4);
+ 
+     return frame;
+diff --git a/vita3k/renderer/src/vulkan/texture.cpp b/vita3k/renderer/src/vulkan/texture.cpp
+--- a/vita3k/renderer/src/vulkan/texture.cpp
++++ b/vita3k/renderer/src/vulkan/texture.cpp
+@@ -518,6 +518,7 @@
+     }
+ 
+     memcpy(static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + staging_buffer.used_so_far, text_data, upload_size);
++    staging_buffer.buffer.wrote(staging_buffer.used_so_far, upload_size);
+ 
+     vk::ImageSubresourceLayers layer{
+         .aspectMask = vk::ImageAspectFlagBits::eColor,
+diff --git a/vita3k/vkutil/include/vkutil/objects.h b/vita3k/vkutil/include/vkutil/objects.h
+--- a/vita3k/vkutil/include/vkutil/objects.h
++++ b/vita3k/vkutil/include/vkutil/objects.h
+@@ -84,6 +84,14 @@
+     Buffer &operator=(Buffer const &) = delete;
+ 
+     void init_buffer(vk::BufferUsageFlags usage_flags, const vma::AllocationCreateInfo &alloc_create_info = vma_auto_alloc);
++
++    // chimera: a mapping is not promised to follow the device's memory by
++    // itself - in a core no memory type is coherent. wrote(): bytes were
++    // written through mapped_data and the device has to see them before it
++    // uses them. will_read(): the device wrote, and mapped_data has to show
++    // it. Both do nothing on coherent memory, which is every desktop driver's.
++    void wrote(vk::DeviceSize offset = 0, vk::DeviceSize size = VK_WHOLE_SIZE);
++    void will_read(vk::DeviceSize offset = 0, vk::DeviceSize size = VK_WHOLE_SIZE);
+     // called by ~Image
+     void destroy();
+ };
+diff --git a/vita3k/vkutil/src/objects.cpp b/vita3k/vkutil/src/objects.cpp
+--- a/vita3k/vkutil/src/objects.cpp
++++ b/vita3k/vkutil/src/objects.cpp
+@@ -212,6 +212,16 @@
+     cursor = align(cursor, alignment);
+ }
+ 
++void Buffer::wrote(vk::DeviceSize offset, vk::DeviceSize size) {
++    if (allocation)
++        allocator.flushAllocation(allocation, offset, size);
++}
++
++void Buffer::will_read(vk::DeviceSize offset, vk::DeviceSize size) {
++    if (allocation)
++        allocator.invalidateAllocation(allocation, offset, size);
++}
++
+ void HostRingBuffer::create() {
+     buffer.init_buffer(usage, vma_mapped_alloc);
+ 

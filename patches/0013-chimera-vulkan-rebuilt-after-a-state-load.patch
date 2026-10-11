@@ -1,0 +1,894 @@
+diff --git a/vita3k/renderer/include/renderer/frame_host.h b/vita3k/renderer/include/renderer/frame_host.h
+--- a/vita3k/renderer/include/renderer/frame_host.h
++++ b/vita3k/renderer/include/renderer/frame_host.h
+@@ -103,6 +103,13 @@
+     }
+     virtual void lost_context() {
+     }
++    // Chimera, Vulkan: said with true when the renderer finds the context
++    // moved, before it lets go of the objects it remembers - they are another
++    // context's, and nothing it does with them until it says false may reach
++    // a driver
++    virtual void vulkan_context_lost(bool lost) {
++        (void)lost;
++    }
+ 
+     virtual bool set_vsync(bool enabled) {
+         return false;
+diff --git a/vita3k/renderer/include/renderer/vulkan/state.h b/vita3k/renderer/include/renderer/vulkan/state.h
+--- a/vita3k/renderer/include/renderer/vulkan/state.h
++++ b/vita3k/renderer/include/renderer/vulkan/state.h
+@@ -128,6 +128,17 @@
+     bool create(std::unique_ptr<renderer::State> &state, const Config &config);
+     void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) override;
+     void cleanup() override;
++    // every Vulkan object this state made, the device and the instance
++    void destroy_objects();
++
++#ifdef CHIMERA
++    uint64_t chimera_context = 0; // the context the objects were made in
++    const Config *chimera_config = nullptr; // create's and late_init's arguments
++    std::string chimera_game_id;
++    bool chimera_late = false; // late_init has run
++    void chimera_check_context() override;
++    void chimera_rebuild();
++#endif
+ 
+     TextureCache *get_texture_cache() override {
+         return &texture_cache;
+diff --git a/vita3k/renderer/include/renderer/vulkan/surface_cache.h b/vita3k/renderer/include/renderer/vulkan/surface_cache.h
+--- a/vita3k/renderer/include/renderer/vulkan/surface_cache.h
++++ b/vita3k/renderer/include/renderer/vulkan/surface_cache.h
+@@ -223,6 +223,9 @@
+ 
+     // Called after the render has been done
+     void perform_post_surface_sync(const MemState &mem, ColorSurfaceCacheInfo *surface);
++#ifdef CHIMERA
++    void chimera_scene_to_memory(const MemState &mem, ColorSurfaceCacheInfo *surface);
++#endif
+ 
+     // destroy all framebuffers associated with render_target
+     // (meaning their color or depth-stencil surface is not backed by memory)
+diff --git a/vita3k/renderer/include/renderer/vulkan/types.h b/vita3k/renderer/include/renderer/vulkan/types.h
+--- a/vita3k/renderer/include/renderer/vulkan/types.h
++++ b/vita3k/renderer/include/renderer/vulkan/types.h
+@@ -17,6 +17,7 @@
+ 
+ #pragma once
+ 
++#include <set>
+ #include <renderer/texture_cache.h>
+ #include <renderer/types.h>
+ #include <shader/uniform_block.h>
+@@ -343,6 +344,23 @@
+     // check (when the render target has macroblock set) if we are drawing to another block
+     void check_for_macroblock_change(bool is_draw);
+ 
++    // the Vulkan objects of this context, as the constructor makes them
++    void make_objects();
++#ifdef CHIMERA
++    // a state was loaded and the context these objects were made in is gone:
++    // forget them all, and make them again (renderer.cpp, chimera_rebuild)
++    void chimera_drop();
++    void chimera_make();
++
++    // what each of the six ring buffers had handed out when the scene began,
++    // and the most one scene has asked of each so far
++    uint64_t chimera_scene_marks[6] = {};
++    uint64_t chimera_scene_peaks[6] = {};
++
++    void chimera_scene_begins();
++    void chimera_scene_ends();
++#endif
++
+ private:
+     void wait_thread_function(const MemState &mem);
+ };
+@@ -369,8 +387,21 @@
+ 
+     VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &params);
+     ~VKRenderTarget() override;
++
++    // the images, and as many fences and command buffers as the lists have room for
++    void make_objects(VKState &state);
++#ifdef CHIMERA
++    void chimera_drop();
++#endif
+ };
+ 
++#ifdef CHIMERA
++// every context and render target there is: GXM owns them, and after a state
++// is loaded the renderer has to reach each one
++std::set<VKContext *> &live_contexts();
++std::set<VKRenderTarget *> &live_render_targets();
++#endif
++
+ struct VKFragmentProgram : public renderer::FragmentProgram {
+     vk::PipelineColorBlendAttachmentState blending;
+     uint64_t blending_hash;
+diff --git a/vita3k/renderer/src/batch.cpp b/vita3k/renderer/src/batch.cpp
+--- a/vita3k/renderer/src/batch.cpp
++++ b/vita3k/renderer/src/batch.cpp
+@@ -252,6 +252,10 @@
+             if (bg->get_data())
+                 loading->set_background_image(std::move(bg));
+             loading->set_background_only();
++#ifdef CHIMERA
++            // chimera: a state may have been loaded since the renderer was made
++            state.chimera_check_context();
++#endif
+             state.render_frame(display, gxm, mem);
+             state.swap_window();
+         }
+diff --git a/vita3k/renderer/src/sync.cpp b/vita3k/renderer/src/sync.cpp
+--- a/vita3k/renderer/src/sync.cpp
++++ b/vita3k/renderer/src/sync.cpp
+@@ -59,6 +59,12 @@
+     const uint32_t timestamp = helper.pop<uint32_t>();
+ 
+     renderer::wishlist(sync, timestamp);
++#ifdef CHIMERA
++    // chimera: this wait is one a state can be saved in, and it is in the
++    // middle of a command list - the commands after it must not go to a
++    // context that a load has replaced
++    renderer.chimera_check_context();
++#endif
+ }
+ 
+ COMMAND(handle_notification) {
+diff --git a/vita3k/renderer/src/vulkan/context.cpp b/vita3k/renderer/src/vulkan/context.cpp
+--- a/vita3k/renderer/src/vulkan/context.cpp
++++ b/vita3k/renderer/src/vulkan/context.cpp
+@@ -124,6 +124,48 @@
+     }
+ }
+ 
++#ifdef CHIMERA
++// In a core the GPU has finished a scene before the next is recorded
++// (stop_recording waits for it), so a ring buffer never holds more than one
++// scene's data at a time and can be far smaller than upstream's, which holds
++// three frames' worth. Smaller matters: through the sandbox every mapped
++// byte is a byte of the machine's memory, in every savestate and copied at
++// every load. What a scene must never do is ask for more than the buffer
++// holds - it would then draw from bytes it has itself overwritten - so that
++// is measured, and said.
++static vkutil::RingBuffer *ring_of(VKContext &c, int i) {
++    vkutil::RingBuffer *const rings[6] = {
++        &c.vertex_stream_ring_buffer, &c.index_stream_ring_buffer,
++        &c.vertex_uniform_stream_ring_buffer, &c.fragment_uniform_stream_ring_buffer,
++        &c.vertex_info_uniform_buffer, &c.fragment_info_uniform_buffer
++    };
++    return rings[i];
++}
++
++void VKContext::chimera_scene_begins() {
++    for (int i = 0; i < 6; i++)
++        chimera_scene_marks[i] = ring_of(*this, i)->total_allocated;
++}
++
++void VKContext::chimera_scene_ends() {
++    static const char *const names[6] = { "vertices", "indices", "vertex uniforms", "fragment uniforms", "vertex blocks", "fragment blocks" };
++    for (int i = 0; i < 6; i++) {
++        const vkutil::RingBuffer *ring = ring_of(*this, i);
++        const uint64_t asked = ring->total_allocated - chimera_scene_marks[i];
++        if (asked <= chimera_scene_peaks[i])
++            continue;
++        // said when the most a scene has asked for doubles, from 64 KiB up
++        const bool doubled = asked >= KiB(64) && asked >= 2 * std::max<uint64_t>(chimera_scene_peaks[i], KiB(32));
++        if (asked > ring->size())
++            LOG_ERROR("One scene asked for {} KiB of {} and the buffer holds {} KiB: part of it was drawn from overwritten data", asked / 1024, names[i], ring->size() / 1024);
++        else if (doubled)
++            LOG_INFO("The most one scene has asked for of {}: {} KiB of {} KiB", names[i], asked / 1024, ring->size() / 1024);
++        if (asked > ring->size() || doubled)
++            chimera_scene_peaks[i] = asked;
++    }
++}
++#endif
++
+ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const FeatureState &features) {
+     context.render_target = rt;
+     context.scene_timestamp++;
+@@ -167,6 +209,9 @@
+     VKState &state = context.state;
+     state.surface_cache.set_render_target(rt);
+ 
++#ifdef CHIMERA
++    context.chimera_scene_begins();
++#endif
+     context.start_recording(true);
+ 
+     bool force_load = context.record.depth_stencil_surface.force_load;
+@@ -449,7 +494,12 @@
+     }
+ 
+     ColorSurfaceCacheInfo *surface_info = nullptr;
++#ifdef CHIMERA
++    // chimera: without memory mapping too (surface_cache.cpp, chimera_scene_to_memory)
++    if (!state.disable_surface_sync && submit)
++#else
+     if (state.features.enable_memory_mapping && !state.disable_surface_sync && submit)
++#endif
+         surface_info = state.surface_cache.perform_surface_sync();
+ 
+     prerender_cmd.end();
+@@ -482,6 +532,20 @@
+     cmdbuffers_to_submit.clear();
+     state.frame().rendered_fences.push_back(fence);
+ 
++#ifdef CHIMERA
++    if (!state.features.enable_memory_mapping) {
++        // chimera: the scene is finished before anything else is done. Its
++        // picture can then go to the machine's memory, where a state finds
++        // it, and the ring buffers are free for the next scene (above).
++        const auto waited = state.device.waitForFences(fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
++        if (waited != vk::Result::eSuccess)
++            LOG_ERROR("Could not wait for the scene to be finished.");
++        else if (surface_info)
++            state.surface_cache.chimera_scene_to_memory(mem, surface_info);
++        chimera_scene_ends();
++    }
++#endif
++
+     if (state.features.enable_memory_mapping) {
+         // send it to the wait queue
+         state.request_queue.push(FenceWaitRequest{ fence });
+diff --git a/vita3k/renderer/src/vulkan/creation.cpp b/vita3k/renderer/src/vulkan/creation.cpp
+--- a/vita3k/renderer/src/vulkan/creation.cpp
++++ b/vita3k/renderer/src/vulkan/creation.cpp
+@@ -31,15 +31,54 @@
+ VKContext::VKContext(VKState &state, MemState &mem)
+     : state(state)
+     , mem(mem)
++#ifdef CHIMERA
++    // chimera: sized for one scene and not for three frames (context.cpp,
++    // chimera_scene_ends, says why and watches it). The most a scene of the
++    // games tried here asked for is 766 KiB of vertices.
++    , vertex_stream_ring_buffer(vk::BufferUsageFlagBits::eVertexBuffer, MiB(16))
++    , index_stream_ring_buffer(vk::BufferUsageFlagBits::eIndexBuffer, MiB(8))
++    , vertex_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(16))
++    , fragment_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(16))
++    , vertex_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, MiB(2))
++    , fragment_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, MiB(4)) {
++#else
+     , vertex_stream_ring_buffer(vk::BufferUsageFlagBits::eVertexBuffer, MiB(/*128*/ 64))
+     , index_stream_ring_buffer(vk::BufferUsageFlagBits::eIndexBuffer, MiB(64))
+     , vertex_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(/*256*/ 64))
+     , fragment_uniform_stream_ring_buffer(vk::BufferUsageFlagBits::eStorageBuffer, MiB(/*256*/ 64))
+     , vertex_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, MiB(16))
+     , fragment_info_uniform_buffer(vk::BufferUsageFlagBits::eUniformBuffer, MiB(32)) {
++#endif
+     memset(&prev_vert_ublock, 0, sizeof(shader::RenderVertUniformBlock));
+     memset(&prev_frag_ublock, 0, sizeof(shader::RenderFragUniformBlock));
+ 
++    make_objects();
++
++    if (state.features.enable_memory_mapping) {
++        // also initialize the gpu wait thread
++        gpu_request_wait_thread = std::thread(&VKContext::wait_thread_function, this, std::ref(mem));
++    }
++
++    // default values for the viewport and scissors
++    viewport = vk::Viewport{
++        .x = 0.f,
++        .y = 0.f,
++        .width = 960.f * state.res_multiplier,
++        .height = 544.f * state.res_multiplier,
++        .minDepth = 0.f,
++        .maxDepth = 1.f
++    };
++    scissor = vk::Rect2D{
++        .offset = { 0, 0 },
++        .extent = { static_cast<uint32_t>(960 * state.res_multiplier), static_cast<uint32_t>(544U * state.res_multiplier) }
++    };
++
++#ifdef CHIMERA
++    live_contexts().insert(this);
++#endif
++}
++
++void VKContext::make_objects() {
+     // specify the alignment
+     // for the index buffer, we only have 16 or 32bit types
+     index_stream_ring_buffer.alignment = sizeof(uint32_t);
+@@ -56,9 +95,6 @@
+     if (state.features.enable_memory_mapping) {
+         // use the default buffer
+         std::fill_n(vertex_stream_buffers, SCE_GXM_MAX_VERTEX_STREAMS, state.default_buffer.buffer);
+-
+-        // also initialize the gpu wait thread
+-        gpu_request_wait_thread = std::thread(&VKContext::wait_thread_function, this, std::ref(mem));
+     } else {
+         // these are not needed when using memory mapping
+         vertex_stream_ring_buffer.create();
+@@ -72,20 +108,6 @@
+     vertex_info_uniform_buffer.create();
+     fragment_info_uniform_buffer.create();
+ 
+-    // default values for the viewport and scissors
+-    viewport = vk::Viewport{
+-        .x = 0.f,
+-        .y = 0.f,
+-        .width = 960.f * state.res_multiplier,
+-        .height = 544.f * state.res_multiplier,
+-        .minDepth = 0.f,
+-        .maxDepth = 1.f
+-    };
+-    scissor = vk::Rect2D{
+-        .offset = { 0, 0 },
+-        .extent = { static_cast<uint32_t>(960 * state.res_multiplier), static_cast<uint32_t>(544U * state.res_multiplier) }
+-    };
+-
+     // allocate descriptor pools
+     {
+         const uint32_t nb_descriptor = state.features.enable_memory_mapping ? 2U : 4U;
+@@ -150,6 +172,9 @@
+ }
+ 
+ VKContext::~VKContext() {
++#ifdef CHIMERA
++    live_contexts().erase(this);
++#endif
+     if (gpu_request_wait_thread.joinable())
+         gpu_request_wait_thread.join();
+ 
+@@ -168,17 +193,39 @@
+     width = static_cast<uint32_t>(params.width * state.res_multiplier);
+     height = static_cast<uint32_t>(params.height * state.res_multiplier);
+ 
++    if (params.multisampleMode == SCE_GXM_MULTISAMPLE_4X) {
++        // the depth buffer may need to be 4x bigger if we use a texture without downscale
++        depthstencil.width *= 2;
++        depthstencil.height *= 2;
++    }
++
++    constexpr uint16_t SCE_GXM_MAX_SCENES_PER_RENDERTARGET = 8;
++    // hopefully this will always be enough
++    const uint16_t samples_per_frame = std::min<uint16_t>(params.scenesPerFrame + 2, SCE_GXM_MAX_SCENES_PER_RENDERTARGET);
++
++    // the maximum number of fence we will ever need simultaneously is samples_per_frame * MAX_FRAMES_RENDERING
++    fences.resize(samples_per_frame * MAX_FRAMES_RENDERING);
++    for (int i = 0; i < MAX_FRAMES_RENDERING; i++) {
++        cmd_buffers[i].resize(samples_per_frame);
++        pre_cmd_buffers[i].resize(samples_per_frame);
++    }
++
++    make_objects(state);
++
++#ifdef CHIMERA
++    live_render_targets().insert(this);
++#endif
++}
++
++void VKRenderTarget::make_objects(VKState &state) {
++    device = state.device;
++
+     vk::ImageUsageFlags color_usage = vk::ImageUsageFlagBits::eColorAttachment;
+     if (state.features.support_shader_interlock)
+         color_usage |= vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eStorage;
+     else
+         color_usage |= vk::ImageUsageFlagBits::eInputAttachment | vk::ImageUsageFlagBits::eTransientAttachment;
+     color.init_image(color_usage);
+-    if (params.multisampleMode == SCE_GXM_MULTISAMPLE_4X) {
+-        // the depth buffer may need to be 4x bigger if we use a texture without downscale
+-        depthstencil.width *= 2;
+-        depthstencil.height *= 2;
+-    }
+ 
+     depthstencil.init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransientAttachment);
+ 
+@@ -190,12 +237,6 @@
+     depthstencil.transition_to_discard(cmd_buffer, vkutil::ImageLayout::DepthStencilAttachment, vkutil::ds_subresource_range);
+     vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+ 
+-    constexpr uint16_t SCE_GXM_MAX_SCENES_PER_RENDERTARGET = 8;
+-    // hopefully this will always be enough
+-    const uint16_t samples_per_frame = std::min<uint16_t>(params.scenesPerFrame + 2, SCE_GXM_MAX_SCENES_PER_RENDERTARGET);
+-
+-    // the maximum number of fence we will ever need simultaneously is samples_per_frame * MAX_FRAMES_RENDERING
+-    fences.resize(samples_per_frame * MAX_FRAMES_RENDERING);
+     vk::FenceCreateInfo fence_info{};
+     for (int i = 0; i < fences.size(); i++)
+         fences[i] = state.device.createFence(fence_info);
+@@ -203,21 +244,123 @@
+     for (int i = 0; i < MAX_FRAMES_RENDERING; i++) {
+         vk::CommandBufferAllocateInfo buffer_info{
+             .commandPool = state.frames[i].render_pool,
+-            .commandBufferCount = static_cast<uint32_t>(samples_per_frame)
++            .commandBufferCount = static_cast<uint32_t>(cmd_buffers[i].size())
+         };
+         cmd_buffers[i] = state.device.allocateCommandBuffers(buffer_info);
+ 
+         buffer_info.commandPool = state.frames[i].prerender_pool;
++        buffer_info.commandBufferCount = static_cast<uint32_t>(pre_cmd_buffers[i].size());
+         pre_cmd_buffers[i] = state.device.allocateCommandBuffers(buffer_info);
+     }
+ }
+ 
+ VKRenderTarget::~VKRenderTarget() {
++#ifdef CHIMERA
++    live_render_targets().erase(this);
++#endif
+     for (auto &fence : fences)
+         device.destroy(fence);
+     fences.clear();
+ }
+ 
++#ifdef CHIMERA
++std::set<VKContext *> &live_contexts() {
++    static std::set<VKContext *> contexts;
++    return contexts;
++}
++
++std::set<VKRenderTarget *> &live_render_targets() {
++    static std::set<VKRenderTarget *> targets;
++    return targets;
++}
++
++// A state was loaded: every handle in here names an object of a context that
++// no longer exists. The buffers give their memory back (no call of theirs
++// reaches a driver while this runs - frame_host.h, vulkan_context_lost) and
++// every other handle is forgotten; what the application set - the viewport,
++// the scissor, the timestamps, the visibility buffers it declared - stays.
++void VKContext::chimera_drop() {
++    if (is_recording)
++        LOG_ERROR("A state was loaded in the middle of a scene: what it had drawn so far is lost");
++    is_recording = false;
++    in_renderpass = false;
++    is_in_query = false;
++    render_cmd = nullptr;
++    prerender_cmd = nullptr;
++    next_fence = nullptr;
++    cmdbuffers_to_submit.clear();
++
++    vertex_stream_ring_buffer.destroy();
++    index_stream_ring_buffer.destroy();
++    vertex_uniform_stream_ring_buffer.destroy();
++    fragment_uniform_stream_ring_buffer.destroy();
++    vertex_info_uniform_buffer.destroy();
++    fragment_info_uniform_buffer.destroy();
++    std::fill_n(vertex_stream_buffers, SCE_GXM_MAX_VERTEX_STREAMS, vk::Buffer{});
++
++    for (auto &[addr, vb] : visibility_buffers) {
++        vb.query_pool = nullptr;
++        vb.gpu_buffer = nullptr;
++    }
++
++    global_descriptor_pool = nullptr;
++    global_set = nullptr;
++    empty_set = nullptr;
++    rendertarget_set = nullptr;
++    last_vert_texture_count = ~0;
++    last_vert_texture_descriptor = nullptr;
++    last_frag_texture_count = ~0;
++    last_frag_texture_descriptor = nullptr;
++    for (int i = 0; i < SCE_GXM_MAX_TEXTURE_UNITS; i++) {
++        vertex_textures[i] = vk::DescriptorImageInfo{};
++        fragment_textures[i] = vk::DescriptorImageInfo{};
++    }
++
++    current_render_pass = nullptr;
++    current_shader_interlock_pass = nullptr;
++    current_pipeline = nullptr;
++    current_framebuffer = nullptr;
++    current_shader_interlock_framebuffer = nullptr;
++    current_color_base_image = nullptr;
++    current_color_view = nullptr;
++    current_ds_view = nullptr;
++    refresh_pipeline = true;
++
++    // the blocks the buffers held are gone with them: the next draw writes its own
++    memset(&prev_vert_ublock, 0, sizeof(shader::RenderVertUniformBlock));
++    memset(&prev_frag_ublock, 0, sizeof(shader::RenderFragUniformBlock));
++}
++
++void VKContext::chimera_make() {
++    make_objects();
++
++    for (auto &[addr, vb] : visibility_buffers) {
++        vk::QueryPoolCreateInfo pool_info{
++            .queryType = vk::QueryType::eOcclusion,
++            .queryCount = vb.size
++        };
++        vb.query_pool = state.device.createQueryPool(pool_info);
++        if (state.features.enable_memory_mapping)
++            std::tie(vb.gpu_buffer, vb.buffer_offset) = state.get_matching_mapping(Ptr<void>(vb.address));
++        vb.queries_used.assign(vb.queries_used.size(), false);
++    }
++    visibility_max_used_idx = -1;
++}
++
++void VKRenderTarget::chimera_drop() {
++    color.destroy();
++    color.layout = vkutil::ImageLayout::Undefined;
++    depthstencil.destroy();
++    depthstencil.layout = vkutil::ImageLayout::Undefined;
++    for (auto &fence : fences)
++        fence = nullptr;
++    for (int i = 0; i < MAX_FRAMES_RENDERING; i++) {
++        std::fill(cmd_buffers[i].begin(), cmd_buffers[i].end(), vk::CommandBuffer{});
++        std::fill(pre_cmd_buffers[i].begin(), pre_cmd_buffers[i].end(), vk::CommandBuffer{});
++    }
++}
++#endif
++
+ bool create(VKState &state, std::unique_ptr<Context> &context, MemState &mem) {
+     context = std::make_unique<VKContext>(state, mem);
+     return true;
+diff --git a/vita3k/renderer/src/vulkan/renderer.cpp b/vita3k/renderer/src/vulkan/renderer.cpp
+--- a/vita3k/renderer/src/vulkan/renderer.cpp
++++ b/vita3k/renderer/src/vulkan/renderer.cpp
+@@ -942,6 +942,8 @@
+     // chimera: the picture's image is not a storage image, and a core offers
+     // no screen filter
+     support_fsr = false;
++    chimera_config = &config;
++    chimera_context = this->renderer::State::frame->context_id();
+ #else
+     support_fsr &= static_cast<bool>(screen_renderer.surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage);
+ #endif
+@@ -951,6 +953,11 @@
+ 
+ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
+     this->mem = &mem;
++#ifdef CHIMERA
++    if (game_id.data() != chimera_game_id.data())
++        chimera_game_id = game_id;
++    chimera_late = true;
++#endif
+ 
+     bool use_high_accuracy = cfg.current_config.high_accuracy;
+ 
+@@ -1009,23 +1016,43 @@
+         || std::string_view(physical_device_properties.deviceName).contains("NVIDIA");
+ #endif
+ 
++#ifdef CHIMERA
++    // chimera: every scene is written back, whoever made the card - what is
++    // in the machine's memory must not depend on it
++    surface_cache.can_mprotect_mapped_memory = false;
++#endif
++
+     pipeline_cache.init(support_rasterized_order_access);
+ 
+     texture_cache.init(true, texture_folder(), game_id);
+ }
+ 
+ void VKState::cleanup() {
+-    const auto release_descriptor_sets = [](FrameDescriptor &descriptor) {
+-        std::vector<vk::DescriptorSet>().swap(descriptor.sets);
+-        descriptor.descriptors_idx = 0;
+-    };
+-
+     device.waitIdle();
+ 
+     request_queue.abort();
+ 
+     context = nullptr;
+ 
++    destroy_objects();
++
++    gxp_ptr_map.clear();
++    shaders_cache_hashs.clear();
++    request_queue.reset();
++    current_frame_idx = 1;
++    last_scene_id = 0;
++    shaders_count_compiled = 0;
++    programs_count_pre_compiled = 0;
++    should_display = false;
++    render_abort = false;
++}
++
++void VKState::destroy_objects() {
++    const auto release_descriptor_sets = [](FrameDescriptor &descriptor) {
++        std::vector<vk::DescriptorSet>().swap(descriptor.sets);
++        descriptor.descriptors_idx = 0;
++    };
++
+     for (int i = 0; i < MAX_FRAMES_RENDERING; i++) {
+         frames[i].rendered_fences.clear();
+         for (auto &descriptor : frames[i].vert_descriptors)
+@@ -1103,16 +1130,62 @@
+ 
+     instance.destroy();
+ 
+-    gxp_ptr_map.clear();
++    // nothing may be mistaken for an object that still exists: create() asks
++    // "is there a device yet" of these
++    allocator = nullptr;
++    general_queue = nullptr;
++    transfer_queue = nullptr;
++    device = nullptr;
++    physical_device = nullptr;
++    instance = nullptr;
++}
++
++#ifdef CHIMERA
++void VKState::chimera_check_context() {
++    const uint64_t id = this->renderer::State::frame->context_id();
++    if (id == 0 || id == chimera_context)
++        return;
++    if (chimera_context != 0)
++        chimera_rebuild();
++    chimera_context = id;
++}
++
++// Every Vulkan object this renderer remembers belongs to another context: a
++// state was loaded, and the host destroyed the device with everything made
++// on it. First the renderer lets go of all of it with its ordinary code -
++// which gives back the memory each object kept on this side, and of which
++// nothing reaches a driver, because the frame host is told the context is
++// lost before and until it is done - and then it makes the instance, the
++// device and every object again, as create and late_init did. What the GPU
++// had drawn comes back from the machine's memory: the core writes every
++// finished scene there (surface_cache.cpp, chimera_scene_to_memory), as the
++// Vita's GPU writes to its own, so a state holds every picture.
++void VKState::chimera_rebuild() {
++    LOG_INFO("The Vulkan context moved (a state was loaded): rebuilding every Vulkan object");
++    auto *frame_host = this->renderer::State::frame;
++    frame_host->vulkan_context_lost(true);
++    for (VKContext *c : live_contexts())
++        c->chimera_drop();
++    for (VKRenderTarget *rt : live_render_targets())
++        rt->chimera_drop();
++    destroy_objects();
++    frame_host->vulkan_context_lost(false);
++
++    std::unique_ptr<renderer::State> nobody;
++    if (!create(nobody, *chimera_config)) {
++        LOG_CRITICAL("The Vulkan renderer could not be made again after a state was loaded");
++        return;
++    }
++    // every shader is made again, and would be listed a second time
+     shaders_cache_hashs.clear();
+-    request_queue.reset();
+-    current_frame_idx = 1;
+-    last_scene_id = 0;
+-    shaders_count_compiled = 0;
+-    programs_count_pre_compiled = 0;
+-    should_display = false;
+-    render_abort = false;
++    if (chimera_late)
++        late_init(*chimera_config, chimera_game_id, *mem);
++    for (VKRenderTarget *rt : live_render_targets())
++        rt->make_objects(*this);
++    for (VKContext *c : live_contexts())
++        c->chimera_make();
+ }
++#endif
+ 
+ void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState &mem) {
+     // we are displaying this frame, wait for a new one
+@@ -1188,7 +1261,9 @@
+ 
+         if (!surface_handle) {
+             vkutil::Image &vita_surface = screen_renderer.vita_surface[screen_renderer.swapchain_image_idx];
+-            if (frame.image_size.x != vita_surface.width || frame.image_size.y != vita_surface.height) {
++            // chimera: "or there is none" - an image the screen renderer has just made
++            // again has no size of its own, and may show the one it had before
++            if (!vita_surface.image || frame.image_size.x != vita_surface.width || frame.image_size.y != vita_surface.height) {
+                 // re-create the image
+                 vita_surface.destroy();
+                 vita_surface = vkutil::Image(frame.image_size.x, frame.image_size.y, vk::Format::eR8G8B8A8Unorm);
+diff --git a/vita3k/renderer/src/vulkan/surface_cache.cpp b/vita3k/renderer/src/vulkan/surface_cache.cpp
+--- a/vita3k/renderer/src/vulkan/surface_cache.cpp
++++ b/vita3k/renderer/src/vulkan/surface_cache.cpp
+@@ -1195,13 +1195,30 @@
+ }
+ 
+ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
++#ifdef CHIMERA
++    // chimera: without memory mapping too - the scene is copied to a buffer
++    // of the surface's own, and chimera_scene_to_memory writes it to the
++    // machine's memory once the GPU is done
++    const bool to_own_buffer = !state.features.enable_memory_mapping;
++#else
++    const bool to_own_buffer = false;
+     // surface sync is supported only if memory mapping is enabled
+     if (!state.features.enable_memory_mapping)
+         return nullptr;
++#endif
+ 
+     if (last_written_surface == nullptr || !*last_written_surface->need_surface_sync)
+         return nullptr;
+ 
++    // what one pixel takes in the image, which is not always what it takes in memory
++    const uint32_t texel_bytes = vk::blockSize(last_written_surface->texture.format);
++    if (to_own_buffer && !format_need_additional_memory(last_written_surface->format)
++        && texel_bytes * 8 != gxm::bits_per_pixel(last_written_surface->format)) {
++        LOG_WARN_ONCE("A surface of format {} is not written back to memory", vk::to_string(last_written_surface->texture.format));
++        last_written_surface = nullptr;
++        return nullptr;
++    }
++
+     VKContext *context = reinterpret_cast<VKContext *>(state.context);
+     vk::CommandBuffer cmd_buffer = context->render_cmd;
+ 
+@@ -1251,14 +1268,17 @@
+ 
+     vk::Buffer buffer;
+     uint32_t offset;
+-    if (format_need_additional_memory(last_written_surface->format)) {
++    if (to_own_buffer || format_need_additional_memory(last_written_surface->format)) {
+         if (!last_written_surface->copy_buffer)
+             last_written_surface->copy_buffer = std::make_unique<vkutil::Buffer>();
+ 
+         vkutil::Buffer &copy_buffer = *last_written_surface->copy_buffer;
+ 
+         if (!copy_buffer.buffer) {
+-            copy_buffer.size = last_written_surface->stride_bytes * last_written_surface->original_height;
++            // chimera: the image's bytes a pixel, not memory's - a three-byte
++            // format is a four-byte image, and the copy writes four
++            const uint32_t stride_pixels = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
++            copy_buffer.size = static_cast<vk::DeviceSize>(stride_pixels) * texel_bytes * last_written_surface->original_height;
+             copy_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
+         }
+ 
+@@ -1345,6 +1365,33 @@
+     }
+ }
+ 
++#ifdef CHIMERA
++// A core has no memory mapping, and a state has to hold every picture: once
++// the GPU has finished the scene (context.cpp, stop_recording), what
++// perform_surface_sync copied out of the surface is written to the machine's
++// memory, where the Vita's GPU would have drawn it. The same bytes upstream's
++// surface sync leaves there.
++void VKSurfaceCache::chimera_scene_to_memory(const MemState &mem, ColorSurfaceCacheInfo *surface) {
++    if (surface == nullptr || !surface->copy_buffer || !surface->copy_buffer->mapped_data)
++        return;
++
++    if (format_need_additional_memory(surface->format)) {
++        // converted on its way out of the buffer
++        perform_post_surface_sync(mem, surface);
++        return;
++    }
++
++    surface->copy_buffer->will_read();
++    memcpy(surface->data.cast<uint8_t>().get(mem), surface->copy_buffer->mapped_data,
++        static_cast<size_t>(surface->stride_bytes) * surface->original_height);
++
++    const bool is_swizzle_identity = surface->swizzle.r == vk::ComponentSwizzle::eR
++        || !format_support_swizzle(surface->format);
++    if (!is_swizzle_identity)
++        perform_post_surface_sync(mem, surface);
++}
++#endif
++
+ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurfaceCacheInfo *surface) {
+     if (surface == nullptr)
+         return;
+diff --git a/vita3k/renderer/src/vulkan/sync_state.cpp b/vita3k/renderer/src/vulkan/sync_state.cpp
+--- a/vita3k/renderer/src/vulkan/sync_state.cpp
++++ b/vita3k/renderer/src/vulkan/sync_state.cpp
+@@ -220,7 +220,12 @@
+         context.visibility_buffers[buffer.address()] = { buffer.address(), nullptr, 0, static_cast<uint32_t>(stride / sizeof(uint32_t)), query_pool };
+         ite = context.visibility_buffers.find(buffer.address());
+ 
+-        std::tie(ite->second.gpu_buffer, ite->second.buffer_offset) = context.state.get_matching_mapping(buffer.cast<void>());
++#ifdef CHIMERA
++        // chimera: with no memory mapping there is no such buffer (and GXM
++        // then passes no visibility test on: SceGxm.cpp)
++        if (context.state.features.enable_memory_mapping)
++#endif
++            std::tie(ite->second.gpu_buffer, ite->second.buffer_offset) = context.state.get_matching_mapping(buffer.cast<void>());
+         // the + 1 is to make computing the ranges easier in context.cpp
+         ite->second.queries_used.resize(ite->second.size + 1, false);
+     }
+diff --git a/vita3k/renderer/src/vulkan/texture.cpp b/vita3k/renderer/src/vulkan/texture.cpp
+--- a/vita3k/renderer/src/vulkan/texture.cpp
++++ b/vita3k/renderer/src/vulkan/texture.cpp
+@@ -69,6 +69,10 @@
+ 
+     for (auto &staging : staging_buffers) {
+         staging.buffer.destroy();
++        // chimera: "no buffer" has to read as "too small", or the next
++        // texture is copied to where the old buffer was
++        staging.buffer.size = 0;
++        staging.used_so_far = 0;
+         staging.waiting_fence = nullptr;
+         staging.scene_timestamp = ~0;
+         staging.frame_timestamp = ~0;
+@@ -80,6 +84,23 @@
+     gxm_texture = nullptr;
+     cmd_buffer = nullptr;
+     is_texture_transfer_ready = false;
++
++    // chimera: what the cache knew goes with the textures. init() makes the
++    // two queues again, and a lookup left as it was would then hand out
++    // entries of the old ones - memory that has been given back.
++    texture_lookup.clear();
++    texture_queue.items.clear();
++    texture_queue.head = nullptr;
++    sampler_lookup.clear();
++    sampler_queue.items.clear();
++    sampler_queue.head = nullptr;
++    last_bound_sampler_index = 0;
++    available_textures_hash.clear();
++    exported_textures_hash.clear();
++    current_info = nullptr;
++    exporting_texture = false;
++    importing_texture = false;
++    imported_texture_raw_data.clear();
+ }
+ 
+ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTexture texture, const Config &config) {
+diff --git a/vita3k/vkutil/include/vkutil/objects.h b/vita3k/vkutil/include/vkutil/objects.h
+--- a/vita3k/vkutil/include/vkutil/objects.h
++++ b/vita3k/vkutil/include/vkutil/objects.h
+@@ -110,6 +110,12 @@
+     // any buffer alignment on vulkan is at most 256 on 99% of instances
+     uint32_t alignment = 256;
+     uint32_t data_offset = 0;
++    // chimera: every byte ever asked of this buffer, and how many it holds -
++    // for telling when one scene asked for more than that (context.cpp)
++    uint64_t total_allocated = 0;
++    uint32_t size() const {
++        return capacity;
++    }
+ 
+     explicit RingBuffer(vk::BufferUsageFlags usage, const size_t capacity);
+     virtual ~RingBuffer() = default;
+@@ -130,6 +136,13 @@
+     vk::Buffer handle() const {
+         return buffer.buffer;
+     }
++
++    // chimera: let go of the buffer, so that create() can make it again
++    void destroy() {
++        buffer.destroy();
++        cursor = ~0;
++        data_offset = 0;
++    }
+ };
+ 
+ // RingBuffer allocated in the GPU memory, may not be accessible from the host
+diff --git a/vita3k/vkutil/include/vkutil/vkutil.h b/vita3k/vkutil/include/vkutil/vkutil.h
+--- a/vita3k/vkutil/include/vkutil/vkutil.h
++++ b/vita3k/vkutil/include/vkutil/vkutil.h
+@@ -168,11 +168,26 @@
+     .usage = vma::MemoryUsage::eAuto
+ };
+ 
++#ifdef CHIMERA
++// chimera: memory the processor reads at speed (cached), not the write-
++// combined kind "sequential write" asks for. In a core a mapping is a copy
++// on this side of the sandbox: every mapped byte is read once when the
++// mapping is made, and what the GPU wrote is read back whenever the renderer
++// wants to see it. From write-combined memory that took 25 ms a picture and
++// about a second a mapping on an NVIDIA card (GTX 1060), which is ten frames
++// a second and five seconds for every savestate loaded.
++static constexpr vma::AllocationCreateInfo vma_mapped_alloc = {
++    .flags = vma::AllocationCreateFlagBits::eHostAccessRandom | vma::AllocationCreateFlagBits::eMapped,
++    .usage = vma::MemoryUsage::eAuto,
++    .preferredFlags = vk::MemoryPropertyFlagBits::eHostCached
++};
++#else
+ static constexpr vma::AllocationCreateInfo vma_mapped_alloc = {
+     .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite | vma::AllocationCreateFlagBits::eMapped,
+     .usage = vma::MemoryUsage::eAuto,
+     .preferredFlags = vk::MemoryPropertyFlagBits::eHostCoherent
+ };
++#endif
+ 
+ static constexpr vma::AllocationCreateInfo vma_host_visible = {
+     .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite,
+diff --git a/vita3k/vkutil/src/objects.cpp b/vita3k/vkutil/src/objects.cpp
+--- a/vita3k/vkutil/src/objects.cpp
++++ b/vita3k/vkutil/src/objects.cpp
+@@ -165,6 +165,8 @@
+     if (buffer) {
+         allocator.destroyBuffer(buffer, allocation);
+         buffer = nullptr;
++        // chimera: the mapping went with it
++        mapped_data = nullptr;
+     }
+ }
+ 
+@@ -206,6 +208,7 @@
+         cursor = 0;
+ 
+     data_offset = cursor;
++    total_allocated += data_size;
+ 
+     cursor += data_size;
+ 

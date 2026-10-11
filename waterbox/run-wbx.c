@@ -19,6 +19,12 @@ const char *chimera_gl_host_description(void);
 uintptr_t chimera_gl_host_dispatch(uintptr_t op, uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
 unsigned long chimera_gl_host_unhandled(long *last_op);
 void chimera_gl_host_state_loaded(void);
+/* the Vulkan bridge's host half (miniBox source/vk/vk-host.h) */
+int chimera_vk_host_init(char *err, int errlen);
+uintptr_t chimera_vk_host_dispatch(uintptr_t op, uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e);
+void chimera_vk_host_state_loaded(void);
+unsigned long chimera_vk_host_refused(long *last_op);
+static int g_vulkan;
 
 typedef struct { FILE *f; } freader;
 static intptr_t file_read(uintptr_t ud, uint8_t *d, uintptr_t s) { return (intptr_t)fread(d, 1, s, ((freader *)ud)->f); }
@@ -92,8 +98,11 @@ static int do_load(const uint8_t *buf, size_t len)
 	if (r.error_message[0]) { fprintf(stderr, "load: %s\n", r.error_message); return 0; }
 	/* the gate's negative control: a load the renderer is not told about */
 	const char *keep = getenv("RUN_WBX_KEEP_CONTEXT");
-	if (!keep || !*keep)
+	if (!keep || !*keep) {
 		chimera_gl_host_state_loaded();
+		if (g_vulkan)
+			chimera_vk_host_state_loaded();
+	}
 	return 1;
 }
 
@@ -174,6 +183,20 @@ int main(int argc, char **argv)
 		if (!gr.data) { fprintf(stderr, "gpu bridge: could not register the callback\n"); return 5; }
 		set_bridge((uint64_t)gr.data);
 	}
+	/* and the Vulkan bridge, on the callback slot the engine uses for it: a
+	 * machine without Vulkan loses the vulkan-hw renderer and nothing else */
+	{
+		char vkerr[256] = "";
+		if (chimera_vk_host_init(vkerr, sizeof vkerr) != 0) {
+			fprintf(stderr, "vulkan bridge: %s\n", vkerr);
+		} else {
+			mb_return vr;
+			wbx_get_callback_addr(g_host, (mb_external_callback)chimera_vk_host_dispatch, 2, &vr);
+			if (!vr.data) { fprintf(stderr, "vulkan bridge: could not register the callback\n"); return 5; }
+			((void (*)(uint64_t))proc("SetVulkanBridge"))((uint64_t)vr.data);
+			g_vulkan = 1;
+		}
+	}
 
 	/* on Linux the guest's calling convention is the host's: the exports are
 	 * called as plain functions */
@@ -209,6 +232,11 @@ int main(int argc, char **argv)
 	const unsigned long unhandled = chimera_gl_host_unhandled(&last);
 	if (unhandled)
 		fprintf(stderr, "gpu bridge: %lu calls had no case (last opcode %ld)\n", unhandled, last);
+	if (g_vulkan) {
+		const unsigned long refused = chimera_vk_host_refused(&last);
+		if (refused)
+			fprintf(stderr, "vulkan bridge: %lu calls were refused (last opcode %ld)\n", refused, last);
+	}
 	fflush(stdout);
 	_Exit(rc);
 }

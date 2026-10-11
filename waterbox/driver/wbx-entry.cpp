@@ -10,6 +10,7 @@
 #include "memfs.h"
 
 #include "gl-bridge.h"
+#include "vk-bridge.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -138,6 +139,32 @@ ECL_EXPORT void SetGpuBridge(uint64_t addr) {
     g_bridge = chimera_gl_install(reinterpret_cast<chimera_gl_bridge_fn>(static_cast<uintptr_t>(addr)));
 }
 
+// The Vulkan bridge, handed over the same way when the machine has Vulkan.
+// Which of the two the renderer uses is the renderer setting's to say.
+bool g_vulkan_bridge = false;
+
+// After a state is loaded, every Vulkan object the renderer remembers belongs
+// to a context that is gone. The renderer takes them apart with its ordinary
+// code, and while it does (chimera_vulkan_quiet) no command crosses to the
+// host: each one answers "done" at once. Nothing is lost by that - the host
+// destroyed the lot when the state was loaded - and a wait on a fence that
+// no longer exists ends instead of failing.
+static chimera_vk_bridge_fn g_vulkan_host = nullptr;
+static bool g_vulkan_quiet = false;
+static uint64_t vulkan_bridge(uint64_t op, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e) {
+    if (g_vulkan_quiet && op >= 100)
+        return 0;
+    return g_vulkan_host(op, a, b, c, d, e);
+}
+void chimera_vulkan_quiet(bool quiet) {
+    g_vulkan_quiet = quiet;
+}
+
+ECL_EXPORT void SetVulkanBridge(uint64_t addr) {
+    g_vulkan_host = reinterpret_cast<chimera_vk_bridge_fn>(static_cast<uintptr_t>(addr));
+    g_vulkan_bridge = g_vulkan_host && chimera_vk_install(vulkan_bridge);
+}
+
 #ifdef CHIMERA_GUEST
 extern "C" bool chimera_mem_access_violation(uint8_t *addr, bool write);
 
@@ -173,16 +200,24 @@ ECL_EXPORT int Init(void) {
     // (it has no software renderer), named "-hw" so a frontend knows to hand
     // the GPU over.
     const std::string renderer = json_string(settings, "renderer");
-    if (!renderer.empty() && renderer != "opengl-hw") {
+    if (!renderer.empty() && renderer != "opengl-hw" && renderer != "vulkan-hw") {
         g_error = "no such renderer: " + renderer;
         return 0;
     }
-    if (!g_bridge) {
+    const bool vulkan = renderer == "vulkan-hw";
+    if (vulkan && !g_vulkan_bridge) {
+        g_error = "the renderer setting is vulkan-hw, and no Vulkan was handed over (this machine may have no Vulkan "
+                  "driver, or this Chimera is older than the Vulkan bridge)";
+        return 0;
+    }
+    if (!vulkan && !g_bridge) {
         g_error = "Vita3K draws with OpenGL on the GPU, and no GPU was handed over (the renderer setting is opengl-hw; "
                   "this machine may have no OpenGL context to give)";
         return 0;
     }
     chimera_vita3k::Options options;
+    options.vulkan = vulkan;
+    g_frame.vulkan = vulkan;
     // "2x": the GPU draws, and the frontend is handed, 1920x1088. Read before
     // the first GL call, because the framebuffer is made at this size.
     const std::string resolution = json_string(settings, "internal_resolution");
