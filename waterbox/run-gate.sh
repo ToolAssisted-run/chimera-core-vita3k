@@ -337,7 +337,7 @@ fi
 if [ -x "$engine" ] && [ -f "$pkg" ]; then
 	python3 "$oracle" movie "$script" 300 "$work/engine.movie"
 	rm -rf "$work/engine-sd"
-	"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --gpu --export-savedata "$work/engine-sd" >"$work/engine.out" 2>&1
+	"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --gpu --settings '{"renderer":"opengl-hw"}' --export-savedata "$work/engine-sd" >"$work/engine.out" 2>&1
 	r=$?
 	verdict=$(python3 "$oracle" check "$script" "$work/engine-sd/data/inputtest/input.txt" 2>&1 | tail -1)
 	if [ "$r" = 0 ] && grep -q '^frames=300' "$work/engine.out" && python3 "$oracle" check "$script" "$work/engine-sd/data/inputtest/input.txt" >/dev/null; then
@@ -349,7 +349,7 @@ if [ -x "$engine" ] && [ -f "$pkg" ]; then
 	# "-hw", and what crashed Chimera on Windows before the renderer setting
 	# existed - the core refuses to start and says why, instead of calling GL
 	# through nothing.
-	"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" >"$work/engine-nogpu.out" 2>&1
+	"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --settings '{"renderer":"opengl-hw"}' >"$work/engine-nogpu.out" 2>&1
 	r=$?
 	if [ "$r" != 0 ] && grep -q "no GPU was handed over" "$work/engine-nogpu.out"; then
 		pass "with no GPU the package refuses to start, and says so (chimera-run exit $r)"
@@ -359,7 +359,7 @@ if [ -x "$engine" ] && [ -f "$pkg" ]; then
 	# Internal Resolution through the engine: the setting as a project gives
 	# it, the picture as the frontend takes it - bigger than the screen, which
 	# the declaration has to leave room for (video.width and height are 4x).
-	"$engine" "$pkg" "$apps/restest.vpk" "$work/engine.movie" --gpu --settings '{"internal_resolution":"2x"}' \
+	"$engine" "$pkg" "$apps/restest.vpk" "$work/engine.movie" --gpu --settings '{"renderer":"opengl-hw","internal_resolution":"2x"}' \
 		--screenshot 100="$work/engine-2x.tga" >"$work/engine-2x.out" 2>&1
 	r=$?
 	verdict=$(python3 "$here/tests/check-resolution.py" "$work/restest-1x.tga" "$work/engine-2x.tga" 2 2>&1); vr=$?

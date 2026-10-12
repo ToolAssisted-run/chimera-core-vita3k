@@ -636,7 +636,9 @@ frames, one audio digest in the whole run, native and sandbox alike.
 
 The owner decided that every core whose emulator has a Vulkan renderer
 offers it, beside what it already offers. Here that is a second value of the
-Renderer setting, `vulkan-hw`; `opengl-hw` stays the default. Chimera hands a
+Renderer setting, `vulkan-hw`; `opengl-hw` stayed the default until
+2026-10-12, when the owner decided that a core whose emulator prefers Vulkan
+defaults to it (Vita3K's own default is Vulkan). Chimera hands a
 core that exports `SetVulkanBridge` miniBox's Vulkan bridge as well as the GL
 one whenever the setting's value ends in `-hw`, and the core uses the one the
 setting names.

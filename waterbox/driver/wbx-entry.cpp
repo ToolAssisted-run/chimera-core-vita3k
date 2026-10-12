@@ -196,9 +196,11 @@ ECL_EXPORT int Init(void) {
         return 0;
     }
     const std::string settings = read_file("settings");
-    // The renderer: Vita3K's OpenGL one on the machine's GPU is the only one
-    // (it has no software renderer), named "-hw" so a frontend knows to hand
-    // the GPU over.
+    // The renderer: Vita3K's Vulkan or OpenGL one, on the machine's GPU (it
+    // has no software renderer), each named "-hw" so a frontend knows to hand
+    // the GPU over. A frontend always names one - the package's default is
+    // Vulkan. With none named, which only this core's own test runner does,
+    // it is OpenGL.
     const std::string renderer = json_string(settings, "renderer");
     if (!renderer.empty() && renderer != "opengl-hw" && renderer != "vulkan-hw") {
         g_error = "no such renderer: " + renderer;

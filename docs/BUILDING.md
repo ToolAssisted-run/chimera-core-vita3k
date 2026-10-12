@@ -410,11 +410,12 @@ Nothing below is in this repository or in the package. The user provides it.
 The package carries no Sony firmware, no fonts and no game. A game's licence
 is its owner's: never put one in a repository, a log or a document.
 
-The Renderer setting has two values. `opengl-hw` is Vita3K's OpenGL renderer
-on the host's GPU through Chimera's GPU bridge, and the default. `vulkan-hw`
-is its Vulkan renderer through Chimera's Vulkan bridge; it needs a Chimera
-that has that bridge (the engine got it on 2026-10-10, commit edc858b) and a
-Vulkan driver on the computer. Handed no GPU, or asked for Vulkan and handed none, the core
+The Renderer setting has two values. `vulkan-hw` is Vita3K's Vulkan renderer
+through Chimera's Vulkan bridge, and the default, as it is Vita3K's own; it
+needs a Chimera that has that bridge (Development build 4ca6e302 or later)
+and a Vulkan driver on the computer. `opengl-hw` is its OpenGL renderer on
+the host's GPU through Chimera's GPU bridge. The core's own test runner
+names the renderer it wants; with none named it uses OpenGL. Handed no GPU, or asked for Vulkan and handed none, the core
 refuses to start and says why.
 
 ## Troubleshooting
