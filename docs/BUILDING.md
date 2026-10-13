@@ -393,6 +393,9 @@ Nothing below is in this repository or in the package. The user provides it.
 - **Game** (required, one file): a `.vpk`; a NoNpDRM dump as a `.zip` (the
   game's folder with its `sce_sys/package/work.bin`); or the PlayStation
   Store's own package, a `.pkg`.
+  A copy made with the old tool Vitamin (a `.vpk` holding
+  `sce_module/steroid.suprx`) is not taken: Vita3K has never run those, and
+  the core says so when it is given one.
 - **Licence** (only for a `.pkg` game): the game's `work.bin`, or the
   console's own `.rif` for the game. A package installs nothing without it.
   A `.vpk` or a `.zip` dump needs none.

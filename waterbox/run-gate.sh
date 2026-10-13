@@ -174,6 +174,26 @@ else
 	fail "a zip that is not a Vita save was taken (exit $r)"
 fi
 
+# An application Vita3K will not install is refused WITH Vita3K's reason: it
+# writes that to its log and nowhere else, and "installed no application" on
+# its own tells nobody what to do (chimera issue 267: a copy made with the
+# tool Vitamin, which Vita3K has never run). The copy here is the input test
+# with the one file Vita3K knows such a copy by.
+python3 -c "
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as src, zipfile.ZipFile(sys.argv[2], 'w') as dst:
+    for name in src.namelist():
+        dst.writestr(name, src.read(name))
+    dst.writestr('sce_module/steroid.suprx', 'not a module')
+" "$apps/inputtest.vpk" "$work/vitamin.vpk"
+r=$(sandboxed vitamin-refuse "$work/vitamin.vpk" 5)
+if [ "$r" = 6 ] && grep -q "installed no application. Vita3K says: A Vitamin dump was detected" "$work/vitamin-refuse.err" \
+	&& grep -q "made with the tool Vitamin" "$work/vitamin-refuse.err"; then
+	pass "an application Vita3K will not install is refused with Vita3K's own reason: $(grep -o 'Vita3K says: [^.]*' "$work/vitamin-refuse.err" | head -1)"
+else
+	fail "a copy Vita3K refuses was not refused with its reason (exit $r) - $(tail -1 "$work/vitamin-refuse.err" | cut -c1-200)"
+fi
+
 # What a system call costs (2026-10-04): every HLE call is 1332 instructions,
 # one microsecond, so a game polling one in a loop does not run it millions
 # of times a second. HleTest times 10000 calls with the machine's own clock;

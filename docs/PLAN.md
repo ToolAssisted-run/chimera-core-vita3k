@@ -858,3 +858,20 @@ of the machine itself differed, so nothing was changed.
 So a comparison of this core's memory across a rewind must leave those
 addresses out, or compare the picture and the sound instead. Not measured:
 a game in play rather than its opening, and any other card.
+
+## A refused application is refused with Vita3K's reason (chimera issue 267, 2026-10-13)
+
+A copy of a game made with the tool Vitamin is one Vita3K does not install:
+it looks for `sce_module/steroid.suprx` in the archive, writes "A Vitamin
+dump was detected, aborting installation..." to its log, and installs
+nothing. The core then said only "<file> installed no application", and the
+log is not something a person is shown.
+
+The core now adds the last error Vita3K wrote to its log, whatever it is,
+and for this one a sentence saying what kind of copy is needed. The check in
+the test script makes such a copy from the input test and reads the message.
+
+Issue 267 itself (Dead or Alive 5 Plus: a smeared model at 1x, the Vulkan
+device lost at 2x) is NOT reproduced: the only copy at hand is one of these.
+Geometry Wars 3 and Alien Shooter at 2x with the Vulkan renderer run to the
+end of their movies on a GeForce GTX 1060 (2,400 and 1,500 frames).

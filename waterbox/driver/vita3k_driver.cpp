@@ -93,6 +93,34 @@ static bool is_package(const std::string &path) {
     return read && std::memcmp(&header.magic, "\x7fPKG", 4) == 0 && std::memcmp(&ext.magic, "\x7f" "ext", 4) == 0;
 }
 
+// The last error Vita3K wrote to its log, without the log's own prefix: ""
+// when it complained of nothing.
+static std::string last_complaint(const std::string &tree) {
+    fflush(nullptr);
+    std::vector<uint8_t> log;
+    if (!chimera::memfs::get(tree + "/log/vita3k.log", log))
+        return {};
+    const std::string text(log.begin(), log.end());
+    std::string last;
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos)
+            end = text.size();
+        const std::string line = text.substr(at, end - at);
+        // "... |C| [function]: what it says" - C is critical, E an error
+        const size_t mark = std::min(line.find("|C| "), line.find("|E| "));
+        if (mark != std::string::npos) {
+            const size_t said = line.find("]: ", mark);
+            last = said == std::string::npos ? line.substr(mark + 4) : line.substr(said + 3);
+        }
+        at = end + 1;
+    }
+    while (!last.empty() && (last.back() == '\r' || last.back() == ' '))
+        last.pop_back();
+    return last;
+}
+
 // The game as a package (.pkg), the form the PlayStation Store sends it in:
 // Vita3K unpacks it into the machine and decrypts it with its licence, which
 // the project brings as the game's work.bin. Vita3K looks for a package's
@@ -293,7 +321,15 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
             LOG_DEBUG("the install said:\n{}", said.str());
     }
     if (title_id.empty()) {
+        // Vita3K says why in its log and nowhere else: the last thing it
+        // complained of is the reason, and a person is owed it
         error = host_name + " installed no application";
+        const std::string why = last_complaint(tree);
+        if (!why.empty())
+            error += ". Vita3K says: " + why;
+        if (why.find("Vitamin") != std::string::npos)
+            error += " This file is a copy of the game made with the tool Vitamin, which Vita3K does not run."
+                     " A copy made with NoNpDrm, or the game's .pkg with its licence, is what it takes.";
         return false;
     }
 
