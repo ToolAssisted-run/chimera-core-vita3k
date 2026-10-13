@@ -238,6 +238,7 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     cfg.log_level = 3;
     cfg.disable_surface_sync = options.no_surface_sync;
     cfg.resolution_multiplier = static_cast<float>(options.resolution_scale);
+    cfg.high_accuracy = options.high_accuracy;
     // the system parameters games read (sceAppUtilSystemParamGetInt)
     cfg.sys_lang = options.language;
     cfg.sys_button = options.enter_button;

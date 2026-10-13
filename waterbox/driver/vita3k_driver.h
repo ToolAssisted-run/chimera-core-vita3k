@@ -29,6 +29,10 @@ struct Options {
     // the Vulkan renderer in place of the OpenGL one (the frame host must
     // have a Vulkan bridge)
     bool vulkan = false;
+    // Vita3K's "High Accuracy" (Vulkan only): the framebuffer is read back
+    // inside a shader the exact way, and textures are sampled without the
+    // viewport shortcut. Slower; some games' pictures need it.
+    bool high_accuracy = false;
     // the gate's negative control: an HLE call costs the machine nothing
     // (vsched_hle_call), as before 2026-10-04
     bool free_hle_calls = false;

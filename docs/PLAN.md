@@ -758,6 +758,68 @@ What it does not cover:
 - No game was played to its end with Vulkan, and only Fruit Ninja was
   compared picture by picture.
 
+## The system's dialogs under Vulkan (chimera issue 255, 2026-10-13)
+
+Reported with Dead or Alive 5 Plus and WipEout 2048: under Vulkan the
+system's message dialog ("This game saves data automatically...") was not
+drawn, only the outline of its OK button over the game's picture. OpenGL
+drew it, and so does Vita3K by itself.
+
+The Vita draws these dialogs, not the game, and Vita3K draws them with an
+overlay renderer of its own for each graphics API. A dialog fades in. The
+OpenGL overlay times the fade by the machine's clock (patch 0002 put it
+there); the Vulkan overlay still read the host's clock, which stands still
+in the sandbox. So under Vulkan the fade never moved: the dialog stayed at
+nothing, and its borders, which do not fade, were all that showed. Patch
+0014 gives the Vulkan overlay the machine's clock.
+
+**The test** is a program of our own, `tests/apps/DialogTest` (CC0): a plain
+picture, and on its 30th frame a message dialog that nobody answers. The
+test script runs it through Chimera's headless runner with every frame
+drawn, under both renderers: frame 150 under Vulkan must show the dialog and
+be OpenGL's picture. Run by hand on the package published before the fix,
+the same steps fail (999.99 pixels in a thousand differ: OpenGL has dimmed
+the picture and drawn the box, Vulkan has drawn outlines).
+
+**Measured**: Mesa's software drivers and a GeForce GTX 1060 give the same
+result - the whole dialog with its text, and 2,741 of 522,240 pixels (5.25 in
+a thousand) apart from OpenGL's.
+
+**What is left, and is Vita3K's own.** Those 2,741 pixels are a thin line
+across the OK button with a small arrow shape at each end. Vita3K's Vulkan
+shader smooths the edges of its rounded boxes by how fast the distance to
+the edge changes from pixel to pixel (`fwidth`); along the middle of a box
+that is exactly zero when the box sits symmetrically on the pixel grid, the
+smoothing divides by it, and the border colour comes out. Its OpenGL shader
+uses a fixed width and has no such line. Not changed here: it is upstream's
+shader, shipped compiled, and the owner's rule is that upstream's faults
+are not fixed at this stage.
+
+**A thing to know when testing**: the fade moves when a frame is drawn. A
+headless run that draws only the frames it takes pictures of shows a dialog
+at the start of its fade, which is nothing. `--render-every-frame` draws them
+all, as Chimera's window does.
+
+## Rendering Accuracy (chimera issue 256, 2026-10-13)
+
+A new setting, `rendering_accuracy`: `standard` (the default, as in Vita3K)
+or `high`. It is Vita3K's "High Accuracy" option, which only its Vulkan
+renderer reads: with it the renderer reads the framebuffer back inside a
+shader the exact way (it needs the driver's fragment shader interlock) and
+samples textures without the viewport shortcut. Slower, and some games'
+pictures need it.
+
+**Measured on a GeForce GTX 1060**, Vulkan, Geometry Wars 3 and Alien
+Shooter, 1,500 frames each: both values run; the pictures at frame 1,400 are
+the same pixel for pixel, so neither game needs it; with `high`, two rewinds
+from frame 1,000 end on the same picture. That `high` takes another path on
+the card is seen in the count of Vulkan calls (45,496 against 46,388 over 600
+frames of Alien Shooter). A wrong value is refused with a message.
+
+**Not proved**: the picture the request shows. Its game is not one we have,
+so the difference between `standard` and `high` was not seen with our own
+eyes in any game.
+
 ## Open questions
 
 - SDL stays linked (threads in the kernel, pads, audio): M4 decides whether

@@ -260,6 +260,13 @@ ECL_EXPORT int Init(void) {
         }
         options.enter_button = enter == "cross" ? 1 : 0;
     }
+    // "high": Vita3K's High Accuracy option, which its Vulkan renderer reads
+    const std::string accuracy = json_string(settings, "rendering_accuracy");
+    if (!accuracy.empty() && accuracy != "standard" && accuracy != "high") {
+        g_error = "no such rendering accuracy: " + accuracy;
+        return 0;
+    }
+    options.high_accuracy = accuracy == "high";
     const std::string ngs = json_string(settings, "ngs");
     if (!ngs.empty()) {
         if (ngs != "on" && ngs != "off") {
