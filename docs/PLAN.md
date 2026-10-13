@@ -830,3 +830,31 @@ eyes in any game.
   what decrypts NoNpDRM dumps. Publishing the package is the owner's call.
 - Publishing also needs miniBox's thread-local fix pushed, or the package CI
   builds has the bug.
+
+
+## A run with a rewind against a straight run (2026-10-13)
+
+Asked by the owner after the question found faults in two other cores. On
+Windows on a GeForce GTX 1060 with Vulkan, the whole 4 GiB of the console's
+address space was compared at the end of a run (`chimera-run --dump
+Memory=<file>` writes a fingerprint of every 64 KiB of it), for a movie
+played straight, straight again, with a savestate taken every 300 or 400
+frames and none loaded, and with one rewind:
+
+| game | frames | straight again | states taken | one rewind |
+| --- | --- | --- | --- | --- |
+| Alien Shooter | 1,500 | the same | the same | 8 of 65,536 fingerprints differ |
+| Geometry Wars 3 | 2,400 | the same | the same | 2 of 65,536 differ |
+
+The picture at the last frame is the same in every run.
+
+What differs after a rewind was read byte by byte: 3,074 bytes in one game
+and 397 in the other, every one of them inside an address of the emulator's
+own. Vita3K keeps some of its own objects in the console's memory, and they
+point at things the renderer makes; after a load the renderer is made again
+and those things are at other addresses. A game does not read them. Nothing
+of the machine itself differed, so nothing was changed.
+
+So a comparison of this core's memory across a rewind must leave those
+addresses out, or compare the picture and the sound instead. Not measured:
+a game in play rather than its opening, and any other card.
