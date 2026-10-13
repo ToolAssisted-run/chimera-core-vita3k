@@ -771,6 +771,39 @@ else
 		skip "Vulkan in chimera-run: no $engine or package"
 	fi
 
+	# The system's message dialog (tests/apps/DialogTest). The Vita draws it,
+	# not the program, and Vita3K draws it with a renderer of its own for
+	# each graphics API. Under Vulkan that renderer timed the dialog's
+	# fade-in by the host's clock, which stands still in the sandbox: the
+	# dialog stayed at nothing, and only its outlines showed (chimera issue
+	# 255). Held here: with nothing pressed, frame 150 under Vulkan shows the
+	# dialog (it is not frame 20's picture) and is the picture OpenGL draws.
+	# Ten pixels in a thousand may differ: Vita3K's Vulkan shader leaves a
+	# thin line across the OK button that its OpenGL one does not, which is
+	# 5 in a thousand here and is Vita3K's own. Every frame is drawn, as in
+	# Chimera's window: the fade moves when a frame is drawn.
+	if [ -x "$engine" ] && [ -f "$pkg" ] && [ -f "$apps/dialogtest.vpk" ]; then
+		printf '[Input]\nLogKey:#\n' > "$work/none.movie"
+		"$engine" "$pkg" "$apps/dialogtest.vpk" "$work/none.movie" --gpu --settings '{"renderer":"opengl-hw"}' \
+			--frames 200 --record "$work/blank.movie" >"$work/dialog-record.out" 2>&1
+		for r in opengl-hw vulkan-hw; do
+			"$engine" "$pkg" "$apps/dialogtest.vpk" "$work/blank.movie" --gpu --render-every-frame \
+				--settings "{\"renderer\":\"$r\"}" --screenshot 20="$work/dialog-$r-before.tga" \
+				--screenshot 150="$work/dialog-$r.tga" >"$work/dialog-$r.out" 2>&1
+		done
+		same=$(python3 "$here/tests/check-same-picture.py" "$work/dialog-opengl-hw.tga" "$work/dialog-vulkan-hw.tga" 10 2>&1 | head -1); python3 "$here/tests/check-same-picture.py" "$work/dialog-opengl-hw.tga" "$work/dialog-vulkan-hw.tga" 10 >/dev/null 2>&1; same_rc=$?
+		python3 "$here/tests/check-same-picture.py" "$work/dialog-vulkan-hw.tga" "$work/dialog-vulkan-hw-before.tga" >/dev/null 2>&1; shown_rc=$?
+		if grep -q "no Vulkan was handed over" "$work/dialog-vulkan-hw.out"; then
+			skip "Vulkan: the system's dialog - this engine handed no Vulkan over"
+		elif [ "$same_rc" = 0 ] && [ "$shown_rc" = 1 ]; then
+			pass "Vulkan: the system's message dialog is drawn, and as OpenGL draws it ($same)"
+		else
+			fail "Vulkan: the system's message dialog - against OpenGL: $same; against the frame before it opened, which must differ: exit $shown_rc (see build/gate/dialog-vulkan-hw.out)"
+		fi
+	else
+		skip "Vulkan: the system's dialog - no $engine, package or dialogtest.vpk"
+	fi
+
 	# A game, where it is: the sandbox the same as the native run, the
 	# machine the same as with OpenGL, and a state saved in one process and
 	# carried on in another the same as one run.

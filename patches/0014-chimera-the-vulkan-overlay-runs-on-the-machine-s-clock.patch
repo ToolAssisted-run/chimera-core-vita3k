@@ -1,0 +1,34 @@
+diff --git a/vita3k/renderer/src/vulkan/overlay_renderer.cpp b/vita3k/renderer/src/vulkan/overlay_renderer.cpp
+--- a/vita3k/renderer/src/vulkan/overlay_renderer.cpp
++++ b/vita3k/renderer/src/vulkan/overlay_renderer.cpp
+@@ -23,6 +23,9 @@
+ 
+ #include <overlay/font.h>
+ #include <util/log.h>
++#ifdef CHIMERA
++#include <util/machine.h>
++#endif
+ 
+ #include <algorithm>
+ #include <chrono>
+@@ -1058,9 +1061,20 @@
+                 viewport_w, viewport_h, viewport_x, viewport_y);
+         }
+ 
++#ifdef CHIMERA
++        // chimera: the machine's clock, as the OpenGL overlay reads it. The
++        // host's clock stands still in the sandbox, and an animation timed
++        // by it never moves: a dialog that fades in stayed at nothing, with
++        // only its borders, which do not fade, to show for it (chimera issue
++        // 255).
++        const auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
++            machine::clock::now().time_since_epoch())
++                                      .count();
++#else
+         const auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+                                       .count();
++#endif
+         prepared.view->update(static_cast<uint64_t>(timestamp_us));
+     }
+ 
