@@ -1,0 +1,26 @@
+diff --git a/vita3k/renderer/src/vulkan/surface_cache.cpp b/vita3k/renderer/src/vulkan/surface_cache.cpp
+--- a/vita3k/renderer/src/vulkan/surface_cache.cpp
++++ b/vita3k/renderer/src/vulkan/surface_cache.cpp
+@@ -119,6 +119,22 @@
+ 
+     destroy_queue.add(info.alternate_view);
+ 
++    // chimera: the scaled-down copy a surface sync blits into, and the buffer
++    // it copies to, are made at the surface's size the first time and kept.
++    // A surface's record is used again for another surface (a bigger one, or
++    // the least recently used one taken for a new address), and those stayed:
++    // the next sync blitted and copied the new size into the old, smaller
++    // ones, past their ends - "device lost" at 2x in Dead or Alive 5 Plus
++    // (chimera#267). They go with the surface now.
++    if (info.blit_image) {
++        destroy_queue.add_image(*info.blit_image);
++        info.blit_image.reset();
++    }
++    if (info.copy_buffer) {
++        destroy_queue.add_buffer(*info.copy_buffer);
++        info.copy_buffer.reset();
++    }
++
+     destroy_framebuffers(info.texture.view);
+     destroy_queue.add_image(info.texture);
+ }

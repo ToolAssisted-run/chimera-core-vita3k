@@ -901,3 +901,29 @@ auto-save notice.
 Also seen and not chased: the core's own runners (run-native, run-wbx)
 never reach DOA5's first frame, where Chimera's engine does. The engine is
 what a user runs.
+
+## A surface's sync copies go with the surface (2026-10-14, chimera#267)
+
+At Internal Resolution 2x with Vulkan, Dead or Alive 5 Plus lost the device
+just after PRESS START (`vk::Queue::submit: ErrorDeviceLost`), on the
+reporter's RTX 4060 Ti and on the GTX 1060. Under Khronos' validation
+layers (lavapipe) the run showed 1,860 each of `vkCmdBlitImage` and
+`vkCmdCopyImageToBuffer` writing past their image or buffer: a 960x544
+region into a 720x408 image, then 960x544 out of it into a buffer made for
+the smaller size. At 2x a surface written back to memory is first scaled
+down into `blit_image`, then copied into `copy_buffer`, both made once at
+the surface's size and kept. A surface's record is used again - for a
+bigger surface at the same address, or taken from the least recently used
+end for a new one - and those two stayed with it at the old size. Patch
+0016: `destroy_surface` sends them to the destroy queue (freed once the GPU
+is done) with the rest of the surface.
+
+With the patch: no blit or copy past an end in the same validation run;
+on the 1060 at 2x the game runs 7,000 frames into Story mode, the same
+scenes as at 1x. The validation messages that remain (vertex reads past a
+buffer's end, a view type, an image layout) appear before the patch too
+and were not chased. The OpenGL renderer keeps no such copies.
+
+Test (needs the game and the validation layers): the game at 2x with
+Vulkan, Cross and Start pressed from frame 2,400, to frame 3,000; the
+layers must find no blit or copy past an image or buffer.

@@ -895,4 +895,43 @@ else
 	skip "Dead or Alive 5 Plus: give $doa (with PSVUPDAT.PUP and PSP2UPDAT.PUP beside it) and a Chimera checkout"
 fi
 
+# The same game at 2x with the Vulkan renderer, played past PRESS START
+# (Cross and Start pressed from frame 2,400), under Khronos' validation
+# layers. At 2x a surface written back to memory is first scaled down into
+# a copy kept with the surface; a surface's record is used again for
+# another, bigger surface, and the old copy and its buffer stayed - blits
+# and copies past their ends, which a real card answered with "device lost"
+# (chimera#267, patch 0016). The layers must find no such blit or copy.
+# Needs the validation layers: VK_LAYER_PATH naming a folder with
+# VkLayer_khronos_validation.json.
+if [ -x "$engine" ] && [ -f "$pkg" ] && [ -f "$doa" ] && [ -f "$sysw" ] && [ -f "$fonts" ] &&
+	ls "${VK_LAYER_PATH:-/nonexistent}"/VkLayer_khronos_validation.json >/dev/null 2>&1; then
+	python3 - "$work/doa-play.movie" <<'DOAMOVIE'
+import sys
+# 14 axes (sticks, both touch points, motion) and 14 buttons UDLRXOQTlrSsFB
+axes = "|    0,    0,    0,    0,32768,32768,32768,32768,    0,    0,-1000,    0,    0,    0,"
+rows = []
+for f in range(3000):
+    b = ["."] * 14
+    if f >= 2400:
+        k = f - 2400
+        if k % 90 < 6: b[4] = "X"
+        if 45 <= k % 300 < 51: b[10] = "S"
+    rows.append(axes + "".join(b) + "|")
+open(sys.argv[1], "w").write("\n".join(rows) + "\n")
+DOAMOVIE
+	VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation CHIMERA_DATA_HOME="$work/doa2x-data" timeout 5000 "$engine" "$pkg" "$doa" "$work/doa-play.movie" --gpu \
+		--settings '{"renderer":"vulkan-hw","internal_resolution":"2x"}' --firmware PSVUPDAT.PUP="$sysw" --firmware PSP2UPDAT.PUP="$fonts" \
+		--frames 3000 >"$work/doa2x.out" 2>&1
+	r=$?
+	past=$(grep -ac "VUID-vkCmdBlitImage\|VUID-vkCmdCopyImageToBuffer" "$work/doa2x.out")
+	if [ "$r" = 0 ] && grep -q "^frames=3000" "$work/doa2x.out" && [ "$past" = 0 ]; then
+		pass "Dead or Alive 5 Plus at 2x with Vulkan, past PRESS START to frame 3000: the validation layers find no blit or copy past an image or buffer"
+	else
+		fail "Dead or Alive 5 Plus at 2x with Vulkan (exit $r): $past blits or copies past an image or buffer - $(grep -a -m1 'VUID-vkCmdBlitImage\|VUID-vkCmdCopyImageToBuffer' "$work/doa2x.out" | cut -c1-200)"
+	fi
+else
+	skip "Dead or Alive 5 Plus at 2x with Vulkan: needs $doa and the Vulkan validation layers (VK_LAYER_PATH)"
+fi
+
 exit "$fails"
