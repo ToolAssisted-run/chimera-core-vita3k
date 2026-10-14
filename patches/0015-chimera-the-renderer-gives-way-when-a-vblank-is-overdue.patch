@@ -1,0 +1,23 @@
+diff --git a/vita3k/renderer/src/batch.cpp b/vita3k/renderer/src/batch.cpp
+--- a/vita3k/renderer/src/batch.cpp
++++ b/vita3k/renderer/src/batch.cpp
+@@ -294,8 +294,18 @@
+             break;
+ 
+         const uint64_t vblank = display.vblank_count.load();
+-        if (!state.should_display && vblank == presented)
++        if (!state.should_display && vblank == presented) {
++            // The vblank is due and has not come: a processor that spent its
++            // slice past it handed the machine here before the vblank thread
++            // could run. A wait whose deadline has passed returns at once
++            // and gives nothing away, so without this the loop held the
++            // machine for ever and its clock stopped (chimera#267: Dead or
++            // Alive 5 Plus at the end of its opening). Give way, and the
++            // thread whose time has come runs.
++            if (machine::clock::now() >= next_vblank)
++                machine::yield();
+             continue;
++        }
+         presented = vblank;
+ 
+         if (state.overlay_manager) {

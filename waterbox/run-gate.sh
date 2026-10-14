@@ -874,4 +874,25 @@ else
 	fi
 fi
 
+# Dead or Alive 5 Plus through Chimera's engine (chimera#267): at the end of
+# its opening the machine stopped between frames 1,400 and 1,500 - the
+# renderer's wait for a vblank that was already due returned at once, gave
+# nothing away, and held the machine for ever (patch 0015). The game cannot
+# be in this repository: give it as $content/doa5plus.zip (the NoNpDRM dump,
+# PCSE00235, packed as a stored zip) with both firmware files beside it.
+doa="$content/doa5plus.zip"
+if [ -x "$engine" ] && [ -f "$pkg" ] && [ -f "$doa" ] && [ -f "$sysw" ] && [ -f "$fonts" ]; then
+	: >"$work/doa.movie"
+	CHIMERA_DATA_HOME="$work/doa-data" timeout 3000 "$engine" "$pkg" "$doa" "$work/doa.movie" --gpu --settings '{"renderer":"opengl-hw"}' \
+		--firmware PSVUPDAT.PUP="$sysw" --firmware PSP2UPDAT.PUP="$fonts" --frames 2400 --record "$work/doa-rec.movie" >"$work/doa.out" 2>&1
+	r=$?
+	if [ "$r" = 0 ] && grep -q "^frames=2400" "$work/doa.out"; then
+		pass "Dead or Alive 5 Plus: 2400 frames through Chimera's engine, past the end of its opening where the machine used to stop"
+	else
+		fail "Dead or Alive 5 Plus did not reach frame 2400 (exit $r) - $(tail -1 "$work/doa.out")"
+	fi
+else
+	skip "Dead or Alive 5 Plus: give $doa (with PSVUPDAT.PUP and PSP2UPDAT.PUP beside it) and a Chimera checkout"
+fi
+
 exit "$fails"

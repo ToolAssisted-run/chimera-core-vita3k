@@ -876,3 +876,28 @@ Issue 267 itself (Dead or Alive 5 Plus: a smeared model at 1x, the Vulkan
 device lost at 2x) is NOT reproduced: the only copy at hand is one of these.
 Geometry Wars 3 and Alien Shooter at 2x with the Vulkan renderer run to the
 end of their movies on a GeForce GTX 1060 (2,400 and 1,500 frames).
+
+## The renderer gives way when a vblank is overdue (2026-10-14, chimera#267)
+
+Dead or Alive 5 Plus stopped for good between frames 1,400 and 1,500 at the
+end of its opening, on Windows and Linux alike, with one host thread busy.
+Sampled: the renderer's loop (batch.cpp) waiting for the command queue
+until just past the next vblank, finding nothing, seeing the vblank count
+unchanged, and going round again. A processor thread had spent its slice
+past the vblank and handed the machine to the renderer before the vblank
+thread could run; the renderer's deadline was then already past, and a
+wait whose deadline has passed returns at once without giving way
+(vsched_wait_until), so the vblank thread never ran and the machine's clock
+never moved. Patch 0015: when the vblank is due and has not come, the
+renderer yields, and the thread whose time has come runs. Only a run that
+would have stopped schedules differently.
+
+Test (needs the game, so it is skipped without it): Dead or Alive 5 Plus
+through Chimera's engine to frame 2,400 (`$content/doa5plus.zip`, the
+NoNpDRM dump packed as a stored zip). Before the patch it stopped after
+frame 1,400; with it, frame 2,400 shows the title screen and the game's
+auto-save notice.
+
+Also seen and not chased: the core's own runners (run-native, run-wbx)
+never reach DOA5's first frame, where Chimera's engine does. The engine is
+what a user runs.
