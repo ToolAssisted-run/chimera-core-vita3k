@@ -550,6 +550,20 @@ if [ -f "$game" ] && [ -f "$fonts" ] && [ -f "$sysw" ]; then
 		else
 			fail "Alien Shooter as a package (exit $rn, $rw) - $(diff "$work/alien-shooter-dump.lines" "$work/alien-shooter-pkg-w.lines" | sed -n 2p)$(tail -1 "$work/alien-shooter-pkg-n.err")"
 		fi
+		# The licence as text, a zRIF (chimera#267: a package comes from
+		# NoPayStation with one in a KEY.txt): the same machine again.
+		if python3 "$here/tests/make-zrif.py" "$root/extern/vita3k/external/psvpfstools/libzrif/src/keyflate.c" \
+			"$work/alien-shooter-work.bin" "$work/alien-shooter-zrif.txt" >"$work/make-zrif.txt" 2>&1; then
+			rz=$(sandboxed alien-shooter-pkg-z "$work/alien-shooter.pkg" 300 --licence "$work/alien-shooter-zrif.txt" --firmware PSVUPDAT.PUP="$sysw" --firmware PSP2UPDAT.PUP="$fonts" --digest-every 30)
+			sed 's/^app=[^ ]*//' "$work/alien-shooter-pkg-z.out" >"$work/alien-shooter-pkg-z.lines"
+			if [ "$rz" = 0 ] && cmp -s "$work/alien-shooter-dump.lines" "$work/alien-shooter-pkg-z.lines"; then
+				pass "Alien Shooter as a package with its licence as a zRIF text: the machine the dump starts, in all 300 frames (sandbox)"
+			else
+				fail "Alien Shooter as a package with a zRIF licence (exit $rz) - $(diff "$work/alien-shooter-dump.lines" "$work/alien-shooter-pkg-z.lines" | sed -n 2p)$(tail -1 "$work/alien-shooter-pkg-z.err")"
+			fi
+		else
+			fail "the licence could not be written as a zRIF - $(tail -1 "$work/make-zrif.txt")"
+		fi
 		other="$content/alien-breed.zip"
 		if [ -f "$other" ] && unzip -p "$other" '*/sce_sys/package/work.bin' >"$work/other-work.bin" 2>/dev/null && [ -s "$work/other-work.bin" ]; then
 			r=$(native alien-shooter-pkg-wrong "$work/alien-shooter.pkg" 5 --licence "$work/other-work.bin" --firmware PSP2UPDAT.PUP="$fonts")

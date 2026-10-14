@@ -539,8 +539,9 @@ What it does, measured:
 
 The Game slot takes a `.pkg`, the form the PlayStation Store sends a game
 in, and a new Licence slot (shown when the game is a `.pkg`) takes the
-game's `work.bin` or `.rif`. A file is a package by its two headers, not its
-name. Vita3K's `install_pkg` wants the licence as a zRIF string and its
+game's `work.bin` or `.rif`, or (chimera#267, 2026-10-14) a `.txt` holding
+the licence as a zRIF, which is handed to `install_pkg` as it is. A file is
+a package by its two headers, not its name. Vita3K's `install_pkg` wants the licence as a zRIF string and its
 `find_pkg_zrif` looks for the `.rif` in the machine, at
 `ux0:license/<TITLE ID>/<content id>.rif`; the driver puts the project's
 file there, under the package's own content id whatever it was called, and

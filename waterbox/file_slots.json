@@ -20,9 +20,10 @@
       "max": 1,
       "formats": [
         "bin",
-        "rif"
+        "rif",
+        "txt"
       ],
-      "help": "The licence that decrypts a .pkg game. It is either the game's work.bin (the 512-byte file a NoNpDRM dump keeps in sce_sys/package) or the console's own .rif file for the game. A package is encrypted and installs nothing without it. A .vpk or a .zip dump needs none, because a dump includes its own. The project and the movie record exactly which file was used, as they do for the game.",
+      "help": "The licence that decrypts a .pkg game. It is the game's work.bin (the 512-byte file a NoNpDRM dump keeps in sce_sys/package), the console's own .rif file for the game, or a .txt file holding the licence as a zRIF (one line of letters and digits, as NoPayStation lists it and a KEY.txt beside a package holds it). A package is encrypted and installs nothing without it. A .vpk or a .zip dump needs none, because a dump includes its own. The project and the movie record exactly which file was used, as they do for the game.",
       "exposedWhen": {
         "slot": "game",
         "extension": "pkg"

@@ -396,8 +396,10 @@ Nothing below is in this repository or in the package. The user provides it.
   A copy made with the old tool Vitamin (a `.vpk` holding
   `sce_module/steroid.suprx`) is not taken: Vita3K has never run those, and
   the core says so when it is given one.
-- **Licence** (only for a `.pkg` game): the game's `work.bin`, or the
-  console's own `.rif` for the game. A package installs nothing without it.
+- **Licence** (only for a `.pkg` game): the game's `work.bin`, the
+  console's own `.rif` for the game, or a `.txt` file holding the licence
+  as a zRIF (the text NoPayStation lists, often a `KEY.txt` beside the
+  package). A package installs nothing without it.
   A `.vpk` or a `.zip` dump needs none.
 - **Save data** (optional): a `.zip` as Emulator > Export Save Data... wrote
   it.

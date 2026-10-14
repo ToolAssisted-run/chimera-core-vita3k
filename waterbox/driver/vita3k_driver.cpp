@@ -123,7 +123,8 @@ static std::string last_complaint(const std::string &tree) {
 
 // The game as a package (.pkg), the form the PlayStation Store sends it in:
 // Vita3K unpacks it into the machine and decrypts it with its licence, which
-// the project brings as the game's work.bin. Vita3K looks for a package's
+// the project brings as the game's work.bin, a .rif, or a zRIF in a text
+// file. Vita3K looks for a package's
 // licence in the machine, at ux0:license/<TITLE ID>/<content id>.rif, so that
 // is where the project's file is put - the name is the package's own content
 // id, whatever the file was called. Only a game is the Game slot's: a package
@@ -131,7 +132,7 @@ static std::string last_complaint(const std::string &tree) {
 static bool install_package(EmuEnvState &emuenv, const std::string &app, const std::string &tree, const std::string &host_name,
     const std::string &licence, std::string &title_id, std::string &error) {
     if (licence.empty()) {
-        error = host_name + " is a package, and a package is encrypted: put the game's licence (its work.bin) in the Licence slot";
+        error = host_name + " is a package, and a package is encrypted: put the game's licence (its work.bin, or its zRIF in a .txt file) in the Licence slot";
         return false;
     }
     PkgHeader header{};
@@ -156,20 +157,44 @@ static bool install_package(EmuEnvState &emuenv, const std::string &app, const s
             bytes.insert(bytes.end(), buf, buf + n);
         fclose(f);
     }
-    const std::string rif = tree + "/fs/ux0/license/" + content_id.substr(7, 9) + "/" + content_id + ".rif";
-    if (bytes.empty() || !chimera::memfs::mkdirs(rif.substr(0, rif.rfind('/'))) || !chimera::memfs::put(rif, bytes)) {
+    if (bytes.empty()) {
         error = "cannot read the licence " + licence;
         return false;
     }
-    // The conversion prints the licence, as text, on stdout. That is the one
-    // thing here nobody is to read: it goes nowhere, not even to the log.
+    // The licence as text, a zRIF (what NoPayStation lists for a package, often
+    // kept in a KEY.txt beside it): the same 512 bytes, compressed and written
+    // in base64. Text and nothing else; a work.bin is never all text. The
+    // install writes it into the machine as a .rif itself.
+    std::string zrif;
+    if (std::all_of(bytes.begin(), bytes.end(), [](uint8_t c) { return (c >= 0x20 && c < 0x7f) || c == '\r' || c == '\n' || c == '\t'; })) {
+        std::string text(bytes.begin(), bytes.end());
+        const size_t first = text.find_first_not_of(" \r\n\t");
+        const size_t last = text.find_last_not_of(" \r\n\t");
+        if (first != std::string::npos)
+            text = text.substr(first, last - first + 1);
+        if (!validate_zrif(text)) {
+            error = fs::path(licence).filename().string() + " is not a licence: a text licence is a zRIF, one line of letters and digits";
+            return false;
+        }
+        zrif = text;
+    }
     std::ostringstream unread;
-    std::streambuf *was = std::cout.rdbuf(unread.rdbuf());
-    std::string zrif = find_pkg_zrif(app, emuenv.vita_fs_path);
-    std::cout.rdbuf(was);
-    if (zrif.empty() || !validate_zrif(zrif)) {
-        error = fs::path(licence).filename().string() + " is not a licence: a work.bin is the 512 bytes the console keeps for the game";
-        return false;
+    std::streambuf *was = nullptr;
+    if (zrif.empty()) {
+        const std::string rif = tree + "/fs/ux0/license/" + content_id.substr(7, 9) + "/" + content_id + ".rif";
+        if (!chimera::memfs::mkdirs(rif.substr(0, rif.rfind('/'))) || !chimera::memfs::put(rif, bytes)) {
+            error = "cannot read the licence " + licence;
+            return false;
+        }
+        // The conversion prints the licence, as text, on stdout. That is the one
+        // thing here nobody is to read: it goes nowhere, not even to the log.
+        was = std::cout.rdbuf(unread.rdbuf());
+        zrif = find_pkg_zrif(app, emuenv.vita_fs_path);
+        std::cout.rdbuf(was);
+        if (zrif.empty() || !validate_zrif(zrif)) {
+            error = fs::path(licence).filename().string() + " is not a licence: a work.bin is the 512 bytes the console keeps for the game";
+            return false;
+        }
     }
     std::ostringstream said;
     was = std::cout.rdbuf(said.rdbuf());
