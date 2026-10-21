@@ -7,10 +7,10 @@
   ],
   "AllTrollers": {
     "PlayStation Vita": {
-      "Up": "Up, J1 POV1U, X1 DpadUp",
-      "Down": "Down, J1 POV1D, X1 DpadDown",
-      "Left": "Left, J1 POV1L, X1 DpadLeft",
-      "Right": "Right, J1 POV1R, X1 DpadRight",
+      "Up": "Up, J1 POV0U, X1 DpadUp",
+      "Down": "Down, J1 POV0D, X1 DpadDown",
+      "Left": "Left, J1 POV0L, X1 DpadLeft",
+      "Right": "Right, J1 POV0R, X1 DpadRight",
       "Cross": "X, J1 B2, X1 A",
       "Circle": "C, J1 B3, X1 B",
       "Square": "Z, J1 B1, X1 X",
