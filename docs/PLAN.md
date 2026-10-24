@@ -927,3 +927,16 @@ and were not chased. The OpenGL renderer keeps no such copies.
 Test (needs the game and the validation layers): the game at 2x with
 Vulkan, Cross and Start pressed from frame 2,400, to frame 3,000; the
 layers must find no blit or copy past an image or buffer.
+
+## The GL names a state holds (chimera#367, 2026-10-24)
+
+Built against miniBox 96762cf and later, whose generated GL wrappers keep
+the highest name of each kind the driver has given the guest in the guest's
+own memory, so every state holds it. After a load Chimera keeps every number
+up to those marks from new objects, which covers a state taken by another
+process too, such as a project opened again with its greenzone read back
+from disk. Before, a rebuild deleting an object by its old number could
+delete one it had just made (Dolphin's vertex arrays drew a grey screen
+black). Nothing in this core's own code changed: its build generates the
+wrappers from miniBox, so this note is the commit that rebuilds it. A test
+runner's host half answers the new opcode with nothing (miniBox b7bc1a2).
