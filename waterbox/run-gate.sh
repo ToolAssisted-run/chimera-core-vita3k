@@ -19,6 +19,29 @@ wbx="$root/build/wbx/run-wbx"
 core="$root/build/wbx/core.wbx"
 apps="$root/build/testapps"
 work="$root/build/gate"
+# A game runs only in a project (Chimera, 2026-10-26): crun_game <package>
+# <game> <movie> [chimera-run's options] makes one of the game and the movie,
+# with any --settings and --firmware given, and runs it with the rest
+# (each run under CRUN_TIMEOUT seconds when it is set).
+crun_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+crun_game() {
+	cg_pkg="$1" cg_game="$2" cg_movie="$3" cg_made=""
+	shift 3
+	cg_n=$#
+	while [ "$cg_n" -gt 0 ]; do
+		case "$1" in
+			--settings) cg_made="$cg_made --settings $(crun_quote "$2")"; shift 2; cg_n=$((cg_n - 2)); continue ;;
+			--settings=*) cg_made="$cg_made --settings $(crun_quote "${1#--settings=}")"; shift; cg_n=$((cg_n - 1)); continue ;;
+			--firmware) cg_made="$cg_made --firmware $(crun_quote "$2")"; set -- "$@" "$1" "$2"; shift 2; cg_n=$((cg_n - 2)); continue ;;
+			--firmware=*) cg_made="$cg_made --firmware $(crun_quote "${1#--firmware=}")"; set -- "$@" "$1"; shift; cg_n=$((cg_n - 1)); continue ;;
+		esac
+		set -- "$@" "$1"; shift; cg_n=$((cg_n - 1))
+	done
+	cg_dir="$(mktemp -d "$work/project.XXXXXX")"
+	eval "timeout \"\${CRUN_TIMEOUT:-0}\" \"\$engine\" --new-project \"\$cg_dir/game.chimeraProject\" \"\$cg_pkg\" \"\$cg_game\" \"\$cg_movie\" $cg_made" \
+		> "$cg_dir/make.log" 2>&1 || { echo "chimera-run: no project made: $(tail -1 "$cg_dir/make.log")" >&2; return 2; }
+	timeout "${CRUN_TIMEOUT:-0}" "$engine" --project "$cg_dir/game.chimeraProject" "$cg_pkg" --files "$(dirname "$cg_game")" "$@"
+}
 chimera_root="${CHIMERA_ROOT:-$HOME/chimera}"
 engine="$chimera_root/build/meson-linux/chimera-run"
 pkg="$root/build/package/vita3k.chimeraCore"
@@ -357,7 +380,7 @@ fi
 if [ -x "$engine" ] && [ -f "$pkg" ]; then
 	python3 "$oracle" movie "$script" 300 "$work/engine.movie"
 	rm -rf "$work/engine-sd"
-	"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --gpu --settings '{"renderer":"opengl-hw"}' --export-savedata "$work/engine-sd" >"$work/engine.out" 2>&1
+	crun_game "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --gpu --settings '{"renderer":"opengl-hw"}' --export-savedata "$work/engine-sd" >"$work/engine.out" 2>&1
 	r=$?
 	verdict=$(python3 "$oracle" check "$script" "$work/engine-sd/data/inputtest/input.txt" 2>&1 | tail -1)
 	if [ "$r" = 0 ] && grep -q '^frames=300' "$work/engine.out" && python3 "$oracle" check "$script" "$work/engine-sd/data/inputtest/input.txt" >/dev/null; then
@@ -369,7 +392,7 @@ if [ -x "$engine" ] && [ -f "$pkg" ]; then
 	# "-hw", and what crashed Chimera on Windows before the renderer setting
 	# existed - the core refuses to start and says why, instead of calling GL
 	# through nothing.
-	"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --settings '{"renderer":"opengl-hw"}' >"$work/engine-nogpu.out" 2>&1
+	crun_game "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --settings '{"renderer":"opengl-hw"}' >"$work/engine-nogpu.out" 2>&1
 	r=$?
 	if [ "$r" != 0 ] && grep -q "no GPU was handed over" "$work/engine-nogpu.out"; then
 		pass "with no GPU the package refuses to start, and says so (chimera-run exit $r)"
@@ -379,7 +402,7 @@ if [ -x "$engine" ] && [ -f "$pkg" ]; then
 	# Internal Resolution through the engine: the setting as a project gives
 	# it, the picture as the frontend takes it - bigger than the screen, which
 	# the declaration has to leave room for (video.width and height are 4x).
-	"$engine" "$pkg" "$apps/restest.vpk" "$work/engine.movie" --gpu --settings '{"renderer":"opengl-hw","internal_resolution":"2x"}' \
+	crun_game "$pkg" "$apps/restest.vpk" "$work/engine.movie" --gpu --settings '{"renderer":"opengl-hw","internal_resolution":"2x"}' \
 		--screenshot 100="$work/engine-2x.tga" >"$work/engine-2x.out" 2>&1
 	r=$?
 	verdict=$(python3 "$here/tests/check-resolution.py" "$work/restest-1x.tga" "$work/engine-2x.tga" 2 2>&1); vr=$?
@@ -791,7 +814,7 @@ else
 	# gives it. An engine older than the Vulkan bridge hands none over.
 	if [ -x "$engine" ] && [ -f "$pkg" ]; then
 		rm -rf "$work/engine-vk-sd"
-		"$engine" "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --gpu --settings '{"renderer":"vulkan-hw"}' \
+		crun_game "$pkg" "$apps/inputtest.vpk" "$work/engine.movie" --gpu --settings '{"renderer":"vulkan-hw"}' \
 			--export-savedata "$work/engine-vk-sd" >"$work/engine-vk.out" 2>&1
 		r=$?
 		if [ "$r" != 0 ] && grep -q "no Vulkan was handed over" "$work/engine-vk.out"; then
@@ -818,10 +841,10 @@ else
 	# Chimera's window: the fade moves when a frame is drawn.
 	if [ -x "$engine" ] && [ -f "$pkg" ] && [ -f "$apps/dialogtest.vpk" ]; then
 		printf '[Input]\nLogKey:#\n' > "$work/none.movie"
-		"$engine" "$pkg" "$apps/dialogtest.vpk" "$work/none.movie" --gpu --settings '{"renderer":"opengl-hw"}' \
+		crun_game "$pkg" "$apps/dialogtest.vpk" "$work/none.movie" --gpu --settings '{"renderer":"opengl-hw"}' \
 			--frames 200 --record "$work/blank.movie" >"$work/dialog-record.out" 2>&1
 		for r in opengl-hw vulkan-hw; do
-			"$engine" "$pkg" "$apps/dialogtest.vpk" "$work/blank.movie" --gpu --render-every-frame \
+			crun_game "$pkg" "$apps/dialogtest.vpk" "$work/blank.movie" --gpu --render-every-frame \
 				--settings "{\"renderer\":\"$r\"}" --screenshot 20="$work/dialog-$r-before.tga" \
 				--screenshot 150="$work/dialog-$r.tga" >"$work/dialog-$r.out" 2>&1
 		done
@@ -883,7 +906,7 @@ fi
 doa="$content/doa5plus.zip"
 if [ -x "$engine" ] && [ -f "$pkg" ] && [ -f "$doa" ] && [ -f "$sysw" ] && [ -f "$fonts" ]; then
 	: >"$work/doa.movie"
-	CHIMERA_DATA_HOME="$work/doa-data" timeout 3000 "$engine" "$pkg" "$doa" "$work/doa.movie" --gpu --settings '{"renderer":"opengl-hw"}' \
+	CHIMERA_DATA_HOME="$work/doa-data" CRUN_TIMEOUT=3000 crun_game "$pkg" "$doa" "$work/doa.movie" --gpu --settings '{"renderer":"opengl-hw"}' \
 		--firmware PSVUPDAT.PUP="$sysw" --firmware PSP2UPDAT.PUP="$fonts" --frames 2400 --record "$work/doa-rec.movie" >"$work/doa.out" 2>&1
 	r=$?
 	if [ "$r" = 0 ] && grep -q "^frames=2400" "$work/doa.out"; then
@@ -920,7 +943,7 @@ for f in range(3000):
     rows.append(axes + "".join(b) + "|")
 open(sys.argv[1], "w").write("\n".join(rows) + "\n")
 DOAMOVIE
-	VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation CHIMERA_DATA_HOME="$work/doa2x-data" timeout 5000 "$engine" "$pkg" "$doa" "$work/doa-play.movie" --gpu \
+	VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation CHIMERA_DATA_HOME="$work/doa2x-data" CRUN_TIMEOUT=5000 crun_game "$pkg" "$doa" "$work/doa-play.movie" --gpu \
 		--settings '{"renderer":"vulkan-hw","internal_resolution":"2x"}' --firmware PSVUPDAT.PUP="$sysw" --firmware PSP2UPDAT.PUP="$fonts" \
 		--frames 3000 >"$work/doa2x.out" 2>&1
 	r=$?
