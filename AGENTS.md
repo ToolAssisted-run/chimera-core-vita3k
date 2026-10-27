@@ -39,7 +39,7 @@ miniBox included.
 
 ```
 sudo apt-get update
-sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 perl curl xz-utils bzip2 mono-complete libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libx11-dev libxext-dev libasound2-dev gcc-14 g++-14
+sudo apt-get install -y --no-install-recommends meson ninja-build build-essential cmake pkg-config python3 perl curl xz-utils bzip2 libgl1-mesa-dev libegl-dev libegl-mesa0 libgl1-mesa-dri libgbm1 libx11-dev libxext-dev libasound2-dev gcc-14 g++-14
 
 mkdir -p "$HOME/gcc14"
 for t in gcc:gcc-14 g++:g++-14 cc:gcc-14 c++:g++-14 cpp:cpp-14; do
@@ -64,7 +64,7 @@ meson compile -C "$mb/build/meson-cpp"
 
 The build downloads sources (GCC for miniBox's guest libstdc++, FFmpeg,
 OpenSSL, the Vita SDK). The gate's engine legs and Chimera's contract tests
-also need Chimera's own build and the .NET SDK 8.0: see `docs/BUILDING.md`.
+also need Chimera's own build (with its window, which needs Qt 6.12): see `docs/BUILDING.md`.
 
 ## Build
 
@@ -87,9 +87,9 @@ waterbox/build-testapps.sh
 ## Install the core into Chimera
 
 Chimera ships no cores and downloads nothing. A core is a file in its cores
-folder: `<chimera>/build/Cores/` in a source checkout, or the `Cores` folder
-beside `Chimera.exe` in a release bundle, or the folder chosen in File >
-Core Manager > Change folder... File > Core Manager lists the folder;
+folder: `<chimera>/build/Cores/` in a source checkout, or the `cores` folder
+beside Chimera's program in a release bundle, or the folder chosen in Tools >
+Core Manager... > Change folder... Tools > Core Manager... lists the folder;
 Refresh List rescans it. The same package works on Linux and on Windows.
 `build-package.sh -r <chimera>` copies the package into
 `<chimera>/build/Cores/` when `<chimera>/build` exists; otherwise copy
