@@ -36,6 +36,13 @@
 #include <memory>
 #include <sstream>
 
+/* A text a person reads is a key of languages/en.json, each of its
+ * arguments after a TEXT_ARG, and a text added on a line of its own after a
+ * TEXT_LINE (chimera docs/translations.md). Each is a string of its own so
+ * the byte after it is never read as more of its hex. */
+#define TEXT_ARG "\x1f"
+#define TEXT_LINE "\x1d"
+
 namespace chimera_vita3k {
 
 namespace {
@@ -132,7 +139,7 @@ static std::string last_complaint(const std::string &tree) {
 static bool install_package(EmuEnvState &emuenv, const std::string &app, const std::string &tree, const std::string &host_name,
     const std::string &licence, std::string &title_id, std::string &error) {
     if (licence.empty()) {
-        error = host_name + " is a package, and a package is encrypted: put the game's licence (its work.bin, or its zRIF in a .txt file) in the Licence slot";
+        error = std::string("error.package_needs_licence" TEXT_ARG) + host_name;
         return false;
     }
     PkgHeader header{};
@@ -144,7 +151,7 @@ static bool install_package(EmuEnvState &emuenv, const std::string &app, const s
     }
     const std::string content_id(header.content_id, strnlen(header.content_id, sizeof header.content_id));
     if (content_id.size() < 16) {
-        error = host_name + " names no content: it is not a package Vita3K can install";
+        error = std::string("error.package_no_content" TEXT_ARG) + host_name;
         return false;
     }
     // a file of the machine's own, not a graft of the project's: the install
@@ -158,7 +165,7 @@ static bool install_package(EmuEnvState &emuenv, const std::string &app, const s
         fclose(f);
     }
     if (bytes.empty()) {
-        error = "cannot read the licence " + licence;
+        error = std::string("error.licence_unreadable" TEXT_ARG) + licence;
         return false;
     }
     // The licence as text, a zRIF (what NoPayStation lists for a package, often
@@ -173,7 +180,7 @@ static bool install_package(EmuEnvState &emuenv, const std::string &app, const s
         if (first != std::string::npos)
             text = text.substr(first, last - first + 1);
         if (!validate_zrif(text)) {
-            error = fs::path(licence).filename().string() + " is not a licence: a text licence is a zRIF, one line of letters and digits";
+            error = std::string("error.not_zrif" TEXT_ARG) + fs::path(licence).filename().string();
             return false;
         }
         zrif = text;
@@ -183,7 +190,7 @@ static bool install_package(EmuEnvState &emuenv, const std::string &app, const s
     if (zrif.empty()) {
         const std::string rif = tree + "/fs/ux0/license/" + content_id.substr(7, 9) + "/" + content_id + ".rif";
         if (!chimera::memfs::mkdirs(rif.substr(0, rif.rfind('/'))) || !chimera::memfs::put(rif, bytes)) {
-            error = "cannot read the licence " + licence;
+            error = std::string("error.licence_unreadable" TEXT_ARG) + licence;
             return false;
         }
         // The conversion prints the licence, as text, on stdout. That is the one
@@ -192,7 +199,7 @@ static bool install_package(EmuEnvState &emuenv, const std::string &app, const s
         zrif = find_pkg_zrif(app, emuenv.vita_fs_path);
         std::cout.rdbuf(was);
         if (zrif.empty() || !validate_zrif(zrif)) {
-            error = fs::path(licence).filename().string() + " is not a licence: a work.bin is the 512 bytes the console keeps for the game";
+            error = std::string("error.not_work_bin" TEXT_ARG) + fs::path(licence).filename().string();
             return false;
         }
     }
@@ -203,12 +210,11 @@ static bool install_package(EmuEnvState &emuenv, const std::string &app, const s
     if (!said.str().empty())
         LOG_DEBUG("the install said:\n{}", said.str());
     if (!installed) {
-        error = host_name + " did not install: the package is damaged, or " + fs::path(licence).filename().string() + " is another game's licence";
+        error = std::string("error.not_installed" TEXT_ARG) + host_name + TEXT_ARG + fs::path(licence).filename().string();
         return false;
     }
     if (emuenv.app_info.app_category != "gd") {
-        error = host_name + " is not a game on its own: it installs " + emuenv.app_info.app_title
-            + " (category " + emuenv.app_info.app_category + "), which belongs to a game";
+        error = std::string("error.not_a_game" TEXT_ARG) + host_name + TEXT_ARG + emuenv.app_info.app_title + TEXT_ARG + emuenv.app_info.app_category;
         return false;
     }
     title_id = emuenv.app_info.app_title_id;
@@ -239,7 +245,7 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
         chimera::memfs::graft_static(tree + "/assets/" + assets[i].path, assets[i].data, assets[i].size);
     const std::string app = tree + "/rom/" + fs::path(host_name).filename().string();
     if (!chimera::memfs::graft(app, host_name)) {
-        error = "cannot read " + host_name;
+        error = std::string("error.unreadable" TEXT_ARG) + host_name;
         return false;
     }
     for (const char *d : { "/fs", "/cache", "/log", "/config", "/patch" })
@@ -255,7 +261,7 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     root_paths.set_patch_path(tree + "/patch/");
 
     if (logging::init(root_paths, false) != Success) {
-        error = "the log could not be made";
+        error = "error.no_log";
         return false;
     }
 
@@ -270,7 +276,7 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     g_machine = new Machine;
     EmuEnvState &emuenv = g_machine->emuenv;
     if (config::init_config(cfg, static_cast<int>(args.size()), args_c.data(), root_paths, false) != Success) {
-        error = "the config could not be made";
+        error = "error.no_config";
         return false;
     }
 
@@ -298,7 +304,7 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     cfg.ngs_enable = options.ngs;
 
     if (!app::init(emuenv, cfg, root_paths)) {
-        error = "the emulated environment could not be made";
+        error = "error.no_environment";
         return false;
     }
     init_libraries(emuenv);
@@ -318,12 +324,11 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
         const size_t had = chimera::memfs::list(where).size();
         const std::string version = install_pup(emuenv.vita_fs_path, pup);
         if (version.empty()) {
-            error = "cannot install the system software " + pup;
+            error = std::string("error.firmware_not_installed" TEXT_ARG) + pup;
             return false;
         }
         if (chimera::memfs::list(where).size() <= had) {
-            error = pup + " installed nothing in " + partition + ": it is not the " + (fonts ? "font package" : "system software")
-                + (fonts ? " (is it the system software, PSVUPDAT.PUP?)" : " (is it the font package, PSP2UPDAT.PUP?)");
+            error = std::string(fonts ? "error.not_font_package" TEXT_ARG : "error.not_system_software" TEXT_ARG) + pup + TEXT_ARG + partition;
             return false;
         }
         LOG_INFO("installed {}: system software {}", pup, version);
@@ -348,13 +353,11 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     if (title_id.empty()) {
         // Vita3K says why in its log and nowhere else: the last thing it
         // complained of is the reason, and a person is owed it
-        error = host_name + " installed no application";
         const std::string why = last_complaint(tree);
-        if (!why.empty())
-            error += ". Vita3K says: " + why;
+        error = why.empty() ? std::string("error.no_application" TEXT_ARG) + host_name
+                            : std::string("error.no_application_why" TEXT_ARG) + host_name + TEXT_ARG + why;
         if (why.find("Vitamin") != std::string::npos)
-            error += " This file is a copy of the game made with the tool Vitamin, which Vita3K does not run."
-                     " A copy made with NoNpDrm, or the game's .pkg with its licence, is what it takes.";
+            error += TEXT_LINE "error.vitamin";
         return false;
     }
 
@@ -370,13 +373,13 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
             fclose(f);
         }
         if (zip.empty()) {
-            error = "cannot read the save data " + options.savedata;
+            error = std::string("error.save_data_unreadable" TEXT_ARG) + options.savedata;
             return false;
         }
         // the user it belongs to: made and logged in now, as the launch
         // would a moment later
         if (!app::ensure_current_user(emuenv)) {
-            error = "no user to give the save data to";
+            error = "error.no_user";
             return false;
         }
         if (!savedata::seed(zip, tree + "/fs/ux0", emuenv.cfg.user_id, error))
@@ -390,7 +393,7 @@ bool boot(const std::string &host_name, const Options &options, BridgeFrame &fra
     launch.app_path = title_id;
     if (!session.begin_launch(launch) || !session.initialize_renderer(frame) || !session.initialize_runtime()
         || !session.load_and_run()) {
-        error = title_id + " did not start";
+        error = std::string("error.not_started" TEXT_ARG) + title_id;
         return false;
     }
     return true;

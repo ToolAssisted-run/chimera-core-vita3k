@@ -34,6 +34,11 @@ constexpr int MAX_SCALE = 4;
 int g_scale = 1;
 
 chimera_vita3k::BridgeFrame g_frame(SCREEN_W, SCREEN_H);
+/* A text a person reads is a key of languages/en.json, each of its
+ * arguments after a TEXT_ARG (chimera docs/translations.md). TEXT_ARG is a
+ * string of its own so the byte after it is never read as more of its hex. */
+#define TEXT_ARG "\x1f"
+
 std::string g_error;
 std::vector<uint8_t> g_video(SCREEN_W * SCREEN_H * 4);
 std::vector<uint8_t> g_log;
@@ -192,7 +197,7 @@ ECL_EXPORT int Init(void) {
             name.pop_back();
     }
     if (name.empty()) {
-        g_error = "no game: neither a \"game\" slot nor rom.name";
+        g_error = "error.no_file";
         return 0;
     }
     const std::string settings = read_file("settings");
@@ -203,18 +208,16 @@ ECL_EXPORT int Init(void) {
     // it is OpenGL.
     const std::string renderer = json_string(settings, "renderer");
     if (!renderer.empty() && renderer != "opengl-hw" && renderer != "vulkan-hw") {
-        g_error = "no such renderer: " + renderer;
+        g_error = std::string("error.bad_renderer" TEXT_ARG) + renderer;
         return 0;
     }
     const bool vulkan = renderer == "vulkan-hw";
     if (vulkan && !g_vulkan_bridge) {
-        g_error = "the renderer setting is vulkan-hw, and no Vulkan was handed over (this machine may have no Vulkan "
-                  "driver, or this Chimera is older than the Vulkan bridge)";
+        g_error = "error.no_vulkan_bridge";
         return 0;
     }
     if (!vulkan && !g_bridge) {
-        g_error = "Vita3K draws with OpenGL on the GPU, and no GPU was handed over (the renderer setting is opengl-hw; "
-                  "this machine may have no OpenGL context to give)";
+        g_error = "error.no_gl_bridge";
         return 0;
     }
     chimera_vita3k::Options options;
@@ -226,13 +229,13 @@ ECL_EXPORT int Init(void) {
     if (!resolution.empty()) {
         const int scale = resolution.size() == 2 && resolution[1] == 'x' ? resolution[0] - '0' : 0;
         if (scale < 1 || scale > MAX_SCALE) {
-            g_error = "no such internal resolution: " + resolution;
+            g_error = std::string("error.bad_resolution" TEXT_ARG) + resolution;
             return 0;
         }
         g_scale = scale;
     }
     if (!g_frame.resize(SCREEN_W * g_scale, SCREEN_H * g_scale)) {
-        g_error = "the picture's size cannot change once the machine has drawn";
+        g_error = "error.size_fixed";
         return 0;
     }
     g_video.assign(static_cast<size_t>(SCREEN_W) * g_scale * SCREEN_H * g_scale * 4, 0);
@@ -248,14 +251,14 @@ ECL_EXPORT int Init(void) {
             if (language == LANGUAGES[i])
                 options.language = i;
         if (options.language < 0) {
-            g_error = "no such language: " + language;
+            g_error = std::string("error.bad_language" TEXT_ARG) + language;
             return 0;
         }
     }
     const std::string enter = json_string(settings, "enter_button");
     if (!enter.empty()) {
         if (enter != "cross" && enter != "circle") {
-            g_error = "no such enter button: " + enter;
+            g_error = std::string("error.bad_enter" TEXT_ARG) + enter;
             return 0;
         }
         options.enter_button = enter == "cross" ? 1 : 0;
@@ -263,14 +266,14 @@ ECL_EXPORT int Init(void) {
     // "high": Vita3K's High Accuracy option, which its Vulkan renderer reads
     const std::string accuracy = json_string(settings, "rendering_accuracy");
     if (!accuracy.empty() && accuracy != "standard" && accuracy != "high") {
-        g_error = "no such rendering accuracy: " + accuracy;
+        g_error = std::string("error.bad_accuracy" TEXT_ARG) + accuracy;
         return 0;
     }
     options.high_accuracy = accuracy == "high";
     const std::string ngs = json_string(settings, "ngs");
     if (!ngs.empty()) {
         if (ngs != "on" && ngs != "off") {
-            g_error = "no such NGS setting: " + ngs;
+            g_error = std::string("error.bad_ngs" TEXT_ARG) + ngs;
             return 0;
         }
         options.ngs = ngs == "on";

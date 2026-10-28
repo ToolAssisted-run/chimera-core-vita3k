@@ -191,8 +191,8 @@ else
 	fail "save data did not come back in (exit $rw, $rn; '$(grep -m1 '^loaded' "$log" 2>/dev/null)', count '$count')"
 fi
 r=$(sandboxed inputtest-refuse inputtest.vpk 5 --savedata-in "$work/not-a-save.zip")
-if [ "$r" = 6 ] && grep -q "not a Vita save" "$work/inputtest-refuse.err"; then
-	pass "a zip that is not a Vita save is refused: $(grep -o 'holds readme.txt, which is not a Vita save' "$work/inputtest-refuse.err")"
+if [ "$r" = 6 ] && grep -q "error.save_not_vita" "$work/inputtest-refuse.err"; then
+	pass "a zip that is not a Vita save is refused: $(grep -o 'error.save_not_vita[^a-z]readme.txt' "$work/inputtest-refuse.err")"
 else
 	fail "a zip that is not a Vita save was taken (exit $r)"
 fi
@@ -210,9 +210,9 @@ with zipfile.ZipFile(sys.argv[1]) as src, zipfile.ZipFile(sys.argv[2], 'w') as d
     dst.writestr('sce_module/steroid.suprx', 'not a module')
 " "$apps/inputtest.vpk" "$work/vitamin.vpk"
 r=$(sandboxed vitamin-refuse "$work/vitamin.vpk" 5)
-if [ "$r" = 6 ] && grep -q "installed no application. Vita3K says: A Vitamin dump was detected" "$work/vitamin-refuse.err" \
-	&& grep -q "made with the tool Vitamin" "$work/vitamin-refuse.err"; then
-	pass "an application Vita3K will not install is refused with Vita3K's own reason: $(grep -o 'Vita3K says: [^.]*' "$work/vitamin-refuse.err" | head -1)"
+if [ "$r" = 6 ] && grep -q "error.no_application_why.*A Vitamin dump was detected" "$work/vitamin-refuse.err" \
+	&& grep -q "error.vitamin" "$work/vitamin-refuse.err"; then
+	pass "an application Vita3K will not install is refused with Vita3K's own reason: $(grep -o 'A Vitamin dump[^.]*' "$work/vitamin-refuse.err" | head -1)"
 else
 	fail "a copy Vita3K refuses was not refused with its reason (exit $r) - $(tail -1 "$work/vitamin-refuse.err" | cut -c1-200)"
 fi
@@ -346,8 +346,8 @@ else
 	fail "at 2x, threadtest under rerecord is not the native 2x run's machine (exit $rn, $r) - $(diff "$work/threadtest-2x-rerecord.want" "$work/threadtest-2x-rerecord.got" | sed -n 2p)"
 fi
 r=$(native restest-5x restest.vpk 5 --internal-resolution 5x)
-if [ "$r" != 0 ] && grep -q "no such internal resolution: 5x" "$work/restest-5x.err"; then
-	pass "an internal resolution that is not one of the four is refused: $(grep -o 'no such internal resolution: 5x' "$work/restest-5x.err")"
+if [ "$r" != 0 ] && grep -q "error.bad_resolution[^a-z]5x" "$work/restest-5x.err"; then
+	pass "an internal resolution that is not one of the four is refused: $(grep -o 'error.bad_resolution[^a-z]5x' "$work/restest-5x.err")"
 else
 	fail "an internal resolution of 5x was not refused (exit $r)"
 fi
@@ -367,9 +367,9 @@ PKGSTUB
 r=$(native pkg-nolicence "$work/empty.pkg" 5)
 rj=$(native pkg-junklicence "$work/empty.pkg" 5 --licence "$work/not-a-licence.bin")
 rjw=$(sandboxed pkg-junklicence-wbx "$work/empty.pkg" 5 --licence "$work/not-a-licence.bin")
-if [ "$r" != 0 ] && grep -q "is a package, and a package is encrypted: put the game's licence" "$work/pkg-nolicence.err" \
-	&& [ "$rj" != 0 ] && grep -q "not-a-licence.bin is not a licence" "$work/pkg-junklicence.err" \
-	&& [ "$rjw" != 0 ] && grep -q "not-a-licence.bin is not a licence" "$work/pkg-junklicence-wbx.err"; then
+if [ "$r" != 0 ] && grep -q "error.package_needs_licence" "$work/pkg-nolicence.err" \
+	&& [ "$rj" != 0 ] && grep -q "error.not_[a-z_]*[^a-z]not-a-licence.bin" "$work/pkg-junklicence.err" \
+	&& [ "$rjw" != 0 ] && grep -q "error.not_[a-z_]*[^a-z]not-a-licence.bin" "$work/pkg-junklicence-wbx.err"; then
 	pass "a package with no licence is refused by name, and so is a licence that is not one (native and sandbox)"
 else
 	fail "a package without a usable licence was not refused cleanly (exit $r, $rj, sandbox $rjw) - $(tail -1 "$work/pkg-nolicence.err")"
@@ -432,7 +432,7 @@ if [ -f "$game" ] && [ -f "$fonts" ]; then
 		fail "Alien Shooter: native and sandbox differ, or it drew $pics pictures (exit $rn, $rw) - $(diff "$work/alien-shooter-n.out" "$work/alien-shooter-w.out" | sed -n 2p)"
 	fi
 	r=$(sandboxed swapped-pup "$game" 2 --firmware PSVUPDAT.PUP="$fonts")
-	if [ "$r" = 6 ] && grep -q "is it the font package" "$work/swapped-pup.err"; then
+	if [ "$r" = 6 ] && grep -q "error.not_system_software" "$work/swapped-pup.err"; then
 		pass "the font package handed over as the system software is refused: $(grep -o 'installed nothing in vs0[^(]*' "$work/swapped-pup.err")"
 	else
 		fail "the font package handed over as the system software was taken (exit $r)"
@@ -590,7 +590,7 @@ if [ -f "$game" ] && [ -f "$fonts" ] && [ -f "$sysw" ]; then
 		other="$content/alien-breed.zip"
 		if [ -f "$other" ] && unzip -p "$other" '*/sce_sys/package/work.bin' >"$work/other-work.bin" 2>/dev/null && [ -s "$work/other-work.bin" ]; then
 			r=$(native alien-shooter-pkg-wrong "$work/alien-shooter.pkg" 5 --licence "$work/other-work.bin" --firmware PSP2UPDAT.PUP="$fonts")
-			if [ "$r" != 0 ] && grep -q "did not install" "$work/alien-shooter-pkg-wrong.err"; then
+			if [ "$r" != 0 ] && grep -q "error.not_installed" "$work/alien-shooter-pkg-wrong.err"; then
 				pass "the package with another game's licence installs nothing, and says so"
 			else
 				fail "the package with another game's licence was not refused (exit $r) - $(tail -1 "$work/alien-shooter-pkg-wrong.err")"
@@ -705,7 +705,7 @@ fi
 # SKIP, saying so, on a computer that has none.
 vk="--renderer vulkan-hw"
 r=$(native vk-probe hello_world.vpk 5 $vk)
-if [ "$r" != 0 ] && grep -q "no Vulkan was handed over" "$work/vk-probe.err"; then
+if [ "$r" != 0 ] && grep -q "error.no_vulkan_bridge" "$work/vk-probe.err"; then
 	skip "the Vulkan renderer: this computer offers no Vulkan - $(grep -m1 '^vulkan bridge:' "$work/vk-probe.err" | cut -c16-)"
 else
 	# Every app that draws: the sandbox the same as the native run in every

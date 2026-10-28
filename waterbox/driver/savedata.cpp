@@ -7,6 +7,11 @@
 
 #include <cctype>
 
+/* A text a person reads is a key of languages/en.json, each of its
+ * arguments after a TEXT_ARG (chimera docs/translations.md). TEXT_ARG is a
+ * string of its own so the byte after it is never read as more of its hex. */
+#define TEXT_ARG "\x1f"
+
 namespace chimera_vita3k::savedata {
 
 namespace {
@@ -66,7 +71,7 @@ std::string place(std::string name, const std::string &user_id) {
 bool seed(const std::vector<uint8_t> &zip, const std::string &ux0, const std::string &user_id, std::string &error) {
     mz_zip_archive archive{};
     if (!mz_zip_reader_init_mem(&archive, zip.data(), zip.size(), 0)) {
-        error = "the save data is not a zip";
+        error = "error.save_not_zip";
         return false;
     }
     bool ok = true;
@@ -76,13 +81,12 @@ bool seed(const std::vector<uint8_t> &zip, const std::string &ux0, const std::st
     for (mz_uint i = 0; i < count && ok; i++) {
         mz_zip_archive_file_stat st;
         if (!mz_zip_reader_file_stat(&archive, i, &st)) {
-            error = "the save data zip cannot be read";
+            error = "error.save_unreadable";
             ok = false;
         } else if (!mz_zip_reader_is_file_a_directory(&archive, i)) {
             const std::string where = place(st.m_filename, user_id);
             if (where.empty()) {
-                error = std::string("the save data holds ") + st.m_filename
-                    + ", which is not a Vita save: entries are savedata/<TITLE ID>/..., data/..., or a <TITLE ID>/ folder";
+                error = std::string("error.save_not_vita" TEXT_ARG) + st.m_filename;
                 ok = false;
             } else
                 files.emplace_back(i, ux0 + "/" + where);
@@ -94,7 +98,7 @@ bool seed(const std::vector<uint8_t> &zip, const std::string &ux0, const std::st
         size_t size = 0;
         void *bytes = mz_zip_reader_extract_to_heap(&archive, i, &size, 0);
         if (!bytes) {
-            error = "the save data zip cannot be unpacked: " + path;
+            error = std::string("error.save_not_unpacked" TEXT_ARG) + path;
             ok = false;
             break;
         }
@@ -102,7 +106,7 @@ bool seed(const std::vector<uint8_t> &zip, const std::string &ux0, const std::st
         ok = chimera::memfs::mkdirs(path.substr(0, path.rfind('/'))) && chimera::memfs::put(path, std::vector<uint8_t>(p, p + size));
         mz_free(bytes);
         if (!ok)
-            error = "the save data cannot be written: " + path;
+            error = std::string("error.save_not_written" TEXT_ARG) + path;
     }
     mz_zip_reader_end(&archive);
     return ok;
