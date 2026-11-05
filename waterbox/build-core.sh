@@ -42,6 +42,9 @@ g++ -specs "$sr/lib/musl-gcc.specs" -mcmodel=large -fno-pic -fno-pie \
 	-Wl,--whole-archive "$core_a" -Wl,--no-whole-archive \
 	-Wl,--start-group $libs $deplibs -Wl,--end-group \
 	-L"$sr/lib" -lstdc++ -lgcc -lgcc_eh -lc
+# where the code reads its thread pointer, listed in the image: an Intel Mac
+# rewrites those reads as the core loads (miniBox's wbx-tp-rewrite.py)
+python3 "$mb/source/guest/wbx-tp-rewrite.py" "$out/core.wbx"
 sh "$mb/source/guest/check-wbx.sh" "$out/core.wbx"
 echo "built $out/core.wbx"
 
