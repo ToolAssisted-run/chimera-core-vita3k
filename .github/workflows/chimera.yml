@@ -18,12 +18,6 @@ on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
-    inputs:
-      kind:
-        description: 'dev (rolling) or nightly (dated). Blank means dev.'
-        required: false
-        default: ''
-        type: string
   schedule:
     # 04:00 UTC. A nightly is published only when main moved since the last one;
     # the reusable workflow checks, so an unchanged core costs one idle run.
@@ -152,13 +146,13 @@ jobs:
             build/deps/*/configure.log
 
   publish:
-    # What the gate passed, published as this core's own release: a rolling
-    # `dev` on every green push to main, an immutable `nightly-YYYY-MM-DD` from
-    # the scheduled run, through the one reusable workflow every core
+    # What the gate passed, published as this core's own release: a dated
+    # `nightly-YYYY-MM-DD` from the scheduled run or one started by hand (a push
+    # to main publishes nothing), through the one reusable workflow every core
     # publishes with.
     name: publish
     needs: [ gate ]
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     uses: ToolAssisted-run/chimera/.github/workflows/publish-core.yml@main
@@ -166,4 +160,3 @@ jobs:
       core-id: vita3k
       artifact: vita3k-${{ github.sha }}
       package: vita3k.chimeraCore
-      kind: ${{ github.event.inputs.kind }}

@@ -281,10 +281,9 @@ machine that can give Chimera an OpenGL context - or Vulkan, with the
 Renderer setting on `vulkan-hw`.
 
 Published packages are on this repository's Releases page. CI publishes a
-rolling `dev` release on every green push to main, and a dated
-`nightly-YYYY-MM-DD` release from the scheduled run (04:00 UTC, only when
-main moved since the last one). The asset is named
-`vita3k-<version>.chimeraCore`.
+dated `nightly-YYYY-MM-DD` release from the scheduled run (04:00 UTC, only
+when main moved since the last one). The asset is named
+`vita3k-<version>-x86_64.chimeraCore`.
 
 ## Run the gates
 
@@ -405,8 +404,7 @@ is its owner's: never put one in a repository, a log or a document.
 
 The Renderer setting has two values. `vulkan-hw` is Vita3K's Vulkan renderer
 through Chimera's Vulkan bridge, and the default, as it is Vita3K's own; it
-needs a Chimera that has that bridge (Development build 4ca6e302 or later)
-and a Vulkan driver on the computer. `opengl-hw` is its OpenGL renderer on
+needs a Vulkan driver on the computer. `opengl-hw` is its OpenGL renderer on
 the host's GPU through Chimera's GPU bridge. The core's own test runner
 names the renderer it wants; with none named it uses OpenGL. Handed no GPU, or asked for Vulkan and handed none, the core
 refuses to start and says why.
