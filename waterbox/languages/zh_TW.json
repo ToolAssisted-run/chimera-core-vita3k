@@ -50,7 +50,7 @@
 		"setting.ngs": "NGS 音效",
 		"setting.ngs.about": "Vita3K 的「啟用 NGS 支援」選項。NGS 是 Vita 的音效程式庫，供自行混合聲音的遊戲使用。開啟時，核心會執行此程式庫，這些遊戲便有聲音。關閉時，每次 NGS 呼叫都會立即返回而不做任何事，使用 NGS 的遊戲會變得無聲或遺失部分聲音。除非在此關閉，否則它是開啟的。只有在遊戲於 NGS 內卡住或當機時才需關閉，因為 Vita3K 的 NGS 尚未完整。遊戲從程式庫取得的內容會影響其計時（遊戲可能會等待聲音結束），因此它是機器的一部分，以關閉此項錄製的影片需要關閉。",
 		"setting.renderer": "渲染器",
-		"setting.renderer.about": "畫面如何繪製。兩個選項都是 Vita3K 自己的渲染器，且都在你電腦的顯示卡上繪圖：「vulkan-hw」使用 Vulkan，「opengl-hw」使用 OpenGL。Vulkan 為預設值，因為它是 Vita3K 自己的預設值。它需要具備 Vulkan 的顯示驅動程式，以及會把 Vulkan 交給核心的 Chimera（開發版建置 4ca6e302 或更新版本）；缺少任一者，專案都無法啟動，並會說明原因，此時應選擇「opengl-hw」。Vita3K 沒有不需顯示卡即可運作的渲染器，因此本核心無法在既沒有 Vulkan 也沒有 OpenGL 的電腦上執行。兩者繪製每個像素的方式不完全相同，因此若要使畫面吻合，影片應以錄製時所用的渲染器重播。無論使用哪一個，顯示卡所繪製的內容也會寫回 Vita 的記憶體，因此即時存檔保存的是畫面。",
+		"setting.renderer.about": "畫面如何繪製。兩個選項都是 Vita3K 自己的渲染器，且都在你電腦的顯示卡上繪圖：「vulkan-hw」使用 Vulkan，「opengl-hw」使用 OpenGL。Vulkan 為預設值，因為它是 Vita3K 自己的預設值。它需要具備 Vulkan 的顯示驅動程式，以及會把 Vulkan 交給核心的 Chimera（Nightly 2026-10-12 或更新版本）；缺少任一者，專案都無法啟動，並會說明原因，此時應選擇「opengl-hw」。Vita3K 沒有不需顯示卡即可運作的渲染器，因此本核心無法在既沒有 Vulkan 也沒有 OpenGL 的電腦上執行。兩者繪製每個像素的方式不完全相同，因此若要使畫面吻合，影片應以錄製時所用的渲染器重播。無論使用哪一個，顯示卡所繪製的內容也會寫回 Vita 的記憶體，因此即時存檔保存的是畫面。",
 		"setting.rendering_accuracy": "渲染精確度",
 		"setting.rendering_accuracy.about": "Vita3K 的「高精確度」選項，適用於 Vulkan 渲染器。選擇「standard」（Vita3K 自己的預設值）時，渲染器會採取兩種捷徑，它們較快，且在多數遊戲中是正確的。選擇「high」時兩者都不採取：讀回自己剛繪製內容的遊戲會得到完全相同的結果，紋理也以精確的方式取樣。部分遊戲的畫面只有在「high」下才正確；它較慢，且第一種捷徑需要顯示驅動程式具備「fragment shader interlock」功能（沒有它時，只有第二種會改變）。OpenGL 渲染器不讀取此設定。兩個值繪製每個像素的方式不完全相同，因此若要使畫面吻合，影片應以錄製時所用的設定重播。",
 		"setting.rtc_start": "開機時的時鐘",
